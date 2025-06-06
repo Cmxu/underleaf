@@ -18,3 +18,10 @@ services:
     volumes:
       - ../frontend:/app
     command: npm run dev
+  latex:
+    build:
+      context: ./latex
+      dockerfile: Dockerfile
+    volumes:
+      - ../repos:/workdir
+    command: tail -f /dev/null

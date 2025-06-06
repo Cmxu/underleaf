@@ -199,6 +199,8 @@ npm install
 
 # Set up environment variables
 cp .env.example .env
+# Directory where cloned repositories will be stored
+# (can be customized via REPO_BASE_PATH)
 
 # Start development servers
 npm run dev
