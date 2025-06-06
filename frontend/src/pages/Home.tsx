@@ -1,31 +1,38 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { cloneRepo } from '../utils/api';
 
 export default function Home() {
   const [url, setUrl] = useState('');
   const navigate = useNavigate();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (url.trim()) {
-      // Save the URL (for now just in sessionStorage)
+    if (!url.trim()) return;
+
+    try {
+      await cloneRepo(url.trim());
+      // Save the URL for use in the editor
       sessionStorage.setItem('repoUrl', url.trim());
       navigate('/editor');
+    } catch (err) {
+      alert('Failed to clone repository');
+      console.error(err);
     }
   };
 
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', flexDirection: 'column' }}>
+    <div className="home-container">
       <h1>Underleaf</h1>
-      <form onSubmit={handleSubmit} style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
+      <form onSubmit={handleSubmit} className="home-form">
         <input
           type="url"
           placeholder="Enter Git repository URL"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          style={{ padding: '0.5rem', minWidth: '300px' }}
+          style={{ minWidth: '300px' }}
         />
-        <button type="submit" style={{ padding: '0.5rem 1rem' }}>Open</button>
+        <button type="submit">Open</button>
       </form>
     </div>
   );
