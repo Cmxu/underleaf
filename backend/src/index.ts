@@ -33,9 +33,15 @@ app.post('/api/clone', async (req, res) => {
 
   try {
     await fs.ensureDir(userPath);
-    const git = simpleGit();
-    await git.clone(repoUrl, repoPath);
-    return res.json({ message: 'Repository cloned', path: repoPath });
+    if (await fs.pathExists(repoPath)) {
+      const repoGit = simpleGit(repoPath);
+      await repoGit.pull();
+      return res.json({ message: 'Repository updated', path: repoPath });
+    } else {
+      const git = simpleGit();
+      await git.clone(repoUrl, repoPath);
+      return res.json({ message: 'Repository cloned', path: repoPath });
+    }
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: 'Failed to clone repository' });
