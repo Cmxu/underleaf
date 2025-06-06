@@ -1,16 +1,23 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { cloneRepo } from '../utils/api';
 
 export default function Home() {
   const [url, setUrl] = useState('');
   const navigate = useNavigate();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (url.trim()) {
-      // Save the URL (for now just in sessionStorage)
+    if (!url.trim()) return;
+
+    try {
+      await cloneRepo(url.trim());
+      // Save the URL for use in the editor
       sessionStorage.setItem('repoUrl', url.trim());
       navigate('/editor');
+    } catch (err) {
+      alert('Failed to clone repository');
+      console.error(err);
     }
   };
 
