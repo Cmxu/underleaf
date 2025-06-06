@@ -1,6 +1,6 @@
 export default function FileTree() {
   return (
-    <div style={{ padding: '0.5rem' }}>
+    <div className="file-tree">
       <p>File Tree</p>
       {/* TODO: implement file tree */}
     </div>
