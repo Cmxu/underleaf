@@ -1,3 +1,14 @@
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import Home from './pages/Home';
+import EditorPage from './pages/Editor';
+
 export default function App() {
-  return <h1>Underleaf</h1>;
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/editor" element={<EditorPage />} />
+      </Routes>
+    </BrowserRouter>
+  );
 }
