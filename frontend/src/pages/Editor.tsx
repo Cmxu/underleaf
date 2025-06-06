@@ -31,7 +31,10 @@ export default function EditorPage() {
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <header className="app-header" style={{ padding: '0.5rem', background: '#f5f5f5', display: 'flex', justifyContent: 'space-between' }}>
+      <header
+        className="app-header"
+        style={{ padding: '0.5rem', background: '#f5f5f5', display: 'flex', justifyContent: 'space-between' }}
+      >
         <span>Repo: {repoUrl}</span>
         <button onClick={handleCompile}>Compile</button>
       </header>

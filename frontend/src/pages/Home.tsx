@@ -27,11 +27,10 @@ export default function Home() {
       <form onSubmit={handleSubmit} className="home-form">
         <input
           type="url"
-          placeholder="Enter Git repository URL"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          style={{ minWidth: '300px' }}
         />
+        <p className="hint-text">Enter Git repository URL</p>
         <button type="submit">Open</button>
       </form>
     </div>
