@@ -1,0 +1,11 @@
+{
+  "name": "underleaf",
+  "private": true,
+  "workspaces": ["frontend", "backend"],
+  "scripts": {
+    "dev": "concurrently -k -n frontend,backend -c green.bold,blue.bold \"npm --workspace frontend run dev\" \"npm --workspace backend run dev\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}
