@@ -15,17 +15,17 @@ export default function Home() {
   };
 
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', flexDirection: 'column' }}>
+    <div className="home-container">
       <h1>Underleaf</h1>
-      <form onSubmit={handleSubmit} style={{ display: 'flex', gap: '0.5rem', marginTop: '1rem' }}>
+      <form onSubmit={handleSubmit} className="home-form">
         <input
           type="url"
           placeholder="Enter Git repository URL"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          style={{ padding: '0.5rem', minWidth: '300px' }}
+          style={{ minWidth: '300px' }}
         />
-        <button type="submit" style={{ padding: '0.5rem 1rem' }}>Open</button>
+        <button type="submit">Open</button>
       </form>
     </div>
   );
