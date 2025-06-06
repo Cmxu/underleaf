@@ -6,7 +6,9 @@ Project documentation will be placed here.
 
 ### `POST /api/clone`
 
-Clone a Git repository into a user specific directory. Example body:
+Clone a Git repository into a user specific directory. If the repository
+already exists for that user, it will be updated using `git pull`.
+Example body:
 
 ```json
 {
