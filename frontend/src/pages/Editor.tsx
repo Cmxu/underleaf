@@ -14,11 +14,11 @@ export default function EditorPage() {
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <header style={{ padding: '0.5rem', background: '#f5f5f5' }}>
+      <header className="app-header">
         <span>Repo: {repoUrl}</span>
       </header>
       <div style={{ flex: 1, display: 'flex' }}>
-        <aside style={{ width: '200px', borderRight: '1px solid #ddd' }}>
+        <aside className="sidebar">
           <FileTree />
         </aside>
         <main style={{ flex: 1 }}>
@@ -30,7 +30,7 @@ export default function EditorPage() {
             options={{ minimap: { enabled: false } }}
           />
         </main>
-        <section style={{ width: '400px', borderLeft: '1px solid #ddd', padding: '0.5rem' }}>
+        <section className="preview">
           <p>PDF Preview</p>
           {/* TODO: render PDF preview */}
         </section>
