@@ -45,6 +45,47 @@ export interface SaveFileResponse {
 	message: string;
 }
 
+export interface GitCommitRequest {
+	repoName: string;
+	userId?: string;
+	message: string;
+	author?: {
+		name: string;
+		email: string;
+	};
+}
+
+export interface GitCommitResponse {
+	message: string;
+	hash: string;
+}
+
+export interface GitPushRequest {
+	repoName: string;
+	userId?: string;
+	remote?: string;
+	branch?: string;
+}
+
+export interface GitPushResponse {
+	message: string;
+}
+
+export interface GitStatusRequest {
+	repoName: string;
+	userId?: string;
+}
+
+export interface GitStatusResponse {
+	modified: string[];
+	added: string[];
+	deleted: string[];
+	untracked: string[];
+	clean: boolean;
+	currentBranch: string;
+	tracking?: string;
+}
+
 export interface ApiError {
 	error: string;
 }

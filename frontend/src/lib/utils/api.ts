@@ -4,11 +4,14 @@ import type {
 	CompileRepoResponse, 
 	FileTreeResponse, 
 	FileContentResponse,
-	SaveFileResponse 
+	SaveFileResponse,
+	GitCommitResponse,
+	GitPushResponse,
+	GitStatusResponse
 } from '$types/api';
 
 const API_URL = browser 
-	? (import.meta.env.VITE_API_URL || 'http://localhost:3001')
+	? (import.meta.env.VITE_API_URL || '')
 	: 'http://localhost:3001';
 
 class ApiClient {
@@ -77,6 +80,41 @@ class ApiClient {
 		return this.request<SaveFileResponse>(`/api/files/${userId}/${repoName}/content`, {
 			method: 'PUT',
 			body: JSON.stringify({ filePath, content })
+		});
+	}
+
+	async getGitStatus(
+		repoName: string,
+		userId = 'anonymous'
+	): Promise<GitStatusResponse> {
+		return this.request<GitStatusResponse>(`/api/git/${userId}/${repoName}/status`);
+	}
+
+	async commitChanges(
+		repoName: string,
+		message: string,
+		userId = 'anonymous',
+		author?: { name: string; email: string }
+	): Promise<GitCommitResponse> {
+		return this.request<GitCommitResponse>(`/api/git/${userId}/${repoName}/commit`, {
+			method: 'POST',
+			body: JSON.stringify({ message, author })
+		});
+	}
+
+	async pushChanges(
+		repoName: string,
+		userId = 'anonymous',
+		remote = 'origin',
+		branch?: string
+	): Promise<GitPushResponse> {
+		const body: any = { remote };
+		if (branch) {
+			body.branch = branch;
+		}
+		return this.request<GitPushResponse>(`/api/git/${userId}/${repoName}/push`, {
+			method: 'POST',
+			body: JSON.stringify(body)
 		});
 	}
 }

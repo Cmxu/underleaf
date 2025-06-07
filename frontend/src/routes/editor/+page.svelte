@@ -17,6 +17,16 @@
 	let unsavedChanges = false;
 	let autoSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let pdfUrl: string | null = null;
+	
+	// Git state
+	let gitStatus: any = null;
+	let isCommitting = false;
+	let isPushing = false;
+	let commitMessage = '';
+	let showGitPanel = false;
+	let commitSuccess = false;
+	let pushSuccess = false;
+	let gitError: string | null = null;
 
 	// Get repo name from URL params or localStorage
 	onMount(async () => {
@@ -168,10 +178,8 @@
 			compileSuccess = true;
 			
 			if (result.pdfUrl) {
-				// Add base URL if it's a relative URL
-				pdfUrl = result.pdfUrl.startsWith('http') 
-					? result.pdfUrl 
-					: `http://localhost:3001${result.pdfUrl}`;
+				// Use relative URL since we're proxying through Vite
+				pdfUrl = result.pdfUrl;
 			}
 			
 			console.log('Compilation successful:', result);
@@ -187,6 +195,72 @@
 			localStorage.removeItem('currentRepo');
 		}
 		goto('/');
+	}
+
+	async function handleRefreshGitStatus() {
+		if (!currentRepoName) return;
+		
+		try {
+			gitStatus = await apiClient.getGitStatus(currentRepoName);
+			gitError = null;
+		} catch (err) {
+			gitError = err instanceof Error ? err.message : 'Failed to get Git status';
+		}
+	}
+
+	async function handleCommit() {
+		if (!currentRepoName || !commitMessage.trim()) return;
+		
+		isCommitting = true;
+		commitSuccess = false;
+		gitError = null;
+
+		try {
+			await apiClient.commitChanges(currentRepoName, commitMessage.trim());
+			commitSuccess = true;
+			commitMessage = '';
+			
+			// Refresh Git status after committing
+			await handleRefreshGitStatus();
+			
+			// Clear success message after 3 seconds
+			setTimeout(() => {
+				commitSuccess = false;
+			}, 3000);
+		} catch (err) {
+			gitError = err instanceof Error ? err.message : 'Failed to commit changes';
+		} finally {
+			isCommitting = false;
+		}
+	}
+
+	async function handlePush() {
+		if (!currentRepoName) return;
+		
+		isPushing = true;
+		pushSuccess = false;
+		gitError = null;
+
+		try {
+			await apiClient.pushChanges(currentRepoName);
+			pushSuccess = true;
+			
+			// Clear success message after 3 seconds
+			setTimeout(() => {
+				pushSuccess = false;
+			}, 3000);
+		} catch (err) {
+			gitError = err instanceof Error ? err.message : 'Failed to push changes';
+		} finally {
+			isPushing = false;
+		}
+	}
+
+	function toggleGitPanel() {
+		showGitPanel = !showGitPanel;
+		if (showGitPanel && currentRepoName) {
+			handleRefreshGitStatus();
+		}
 	}
 
 	function getFileNameFromPath(path: string | null): string {
@@ -268,6 +342,18 @@
 					Compile PDF
 				{/if}
 			</button>
+			
+			<button
+				on:click={toggleGitPanel}
+				class="text-gray-400 hover:text-white transition-colors p-2 rounded {showGitPanel ? 'bg-gray-700' : ''}"
+				title="Git Operations"
+				aria-label="Git Operations"
+			>
+				<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+					<path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/>
+					<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z"/>
+				</svg>
+			</button>
 		</div>
 	</header>
 
@@ -277,6 +363,146 @@
 		<aside class="w-64 bg-dark-800 border-r border-gray-700 overflow-y-auto">
 			<FileTree repoName={currentRepoName} onFileSelect={handleFileSelect} />
 		</aside>
+
+		<!-- Git Panel -->
+		{#if showGitPanel}
+			<aside class="w-80 bg-dark-800 border-r border-gray-700 overflow-y-auto">
+				<div class="p-4">
+					<div class="flex items-center justify-between mb-4">
+						<h3 class="text-lg font-medium text-white">Git Operations</h3>
+						<button
+							on:click={handleRefreshGitStatus}
+							class="text-gray-400 hover:text-white transition-colors"
+							title="Refresh Git status"
+						>
+							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+							</svg>
+						</button>
+					</div>
+
+					{#if gitError}
+						<div class="bg-red-500/10 border border-red-500/20 rounded p-3 mb-4">
+							<p class="text-red-300 text-sm">{gitError}</p>
+						</div>
+					{/if}
+
+					{#if commitSuccess}
+						<div class="bg-green-500/10 border border-green-500/20 rounded p-3 mb-4">
+							<p class="text-green-300 text-sm">Changes committed successfully!</p>
+						</div>
+					{/if}
+
+					{#if pushSuccess}
+						<div class="bg-green-500/10 border border-green-500/20 rounded p-3 mb-4">
+							<p class="text-green-300 text-sm">Changes pushed successfully!</p>
+						</div>
+					{/if}
+
+					{#if gitStatus}
+						<div class="mb-6">
+							<h4 class="text-sm font-medium text-gray-300 mb-2">Repository Status</h4>
+							<div class="mb-3 pb-2 border-b border-gray-600">
+								<p class="text-blue-400 text-sm">
+									<svg class="w-4 h-4 inline mr-1" fill="currentColor" viewBox="0 0 20 20">
+										<path fill-rule="evenodd" d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 11-1.414 1.414L2.586 7l3.707-3.707a1 1 0 011.414 0z"/>
+									</svg>
+									Branch: {gitStatus.currentBranch}
+								</p>
+								{#if gitStatus.tracking}
+									<p class="text-gray-400 text-xs">Tracking: {gitStatus.tracking}</p>
+								{/if}
+							</div>
+							{#if gitStatus.clean}
+								<p class="text-green-400 text-sm">✓ Working directory clean</p>
+							{:else}
+								<div class="space-y-2">
+									{#if gitStatus.modified.length > 0}
+										<div>
+											<p class="text-yellow-400 text-sm font-medium">Modified ({gitStatus.modified.length})</p>
+											{#each gitStatus.modified as file}
+												<p class="text-gray-400 text-xs ml-2">• {file}</p>
+											{/each}
+										</div>
+									{/if}
+									{#if gitStatus.untracked.length > 0}
+										<div>
+											<p class="text-red-400 text-sm font-medium">Untracked ({gitStatus.untracked.length})</p>
+											{#each gitStatus.untracked as file}
+												<p class="text-gray-400 text-xs ml-2">• {file}</p>
+											{/each}
+										</div>
+									{/if}
+									{#if gitStatus.added.length > 0}
+										<div>
+											<p class="text-green-400 text-sm font-medium">Added ({gitStatus.added.length})</p>
+											{#each gitStatus.added as file}
+												<p class="text-gray-400 text-xs ml-2">• {file}</p>
+											{/each}
+										</div>
+									{/if}
+									{#if gitStatus.deleted.length > 0}
+										<div>
+											<p class="text-red-400 text-sm font-medium">Deleted ({gitStatus.deleted.length})</p>
+											{#each gitStatus.deleted as file}
+												<p class="text-gray-400 text-xs ml-2">• {file}</p>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							{/if}
+						</div>
+					{/if}
+
+					{#if gitStatus && !gitStatus.clean}
+						<div class="mb-4">
+							<label for="commit-message" class="block text-sm font-medium text-gray-300 mb-2">
+								Commit Message
+							</label>
+							<textarea
+								id="commit-message"
+								bind:value={commitMessage}
+								placeholder="Enter commit message..."
+								class="w-full px-3 py-2 bg-dark-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 text-sm"
+								rows="3"
+							></textarea>
+						</div>
+
+						<div class="flex space-x-2 mb-4">
+							<button
+								on:click={handleCommit}
+								disabled={isCommitting || !commitMessage.trim()}
+								class="flex-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
+							>
+								{#if isCommitting}
+									<div class="flex items-center justify-center space-x-2">
+										<div class="loading-spinner w-4 h-4"></div>
+										<span>Committing...</span>
+									</div>
+								{:else}
+									Commit Changes
+								{/if}
+							</button>
+						</div>
+					{/if}
+
+					<button
+						on:click={handlePush}
+						disabled={isPushing || !currentRepoName}
+						class="w-full bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
+					>
+						{#if isPushing}
+							<div class="flex items-center justify-center space-x-2">
+								<div class="loading-spinner w-4 h-4"></div>
+								<span>Pushing...</span>
+							</div>
+						{:else}
+							Push to Remote
+						{/if}
+					</button>
+				</div>
+			</aside>
+		{/if}
 
 		<!-- Editor -->
 		<div class="flex-1 flex flex-col">

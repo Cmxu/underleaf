@@ -4,7 +4,12 @@ import fs from 'fs-extra';
 import simpleGit from 'simple-git';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import type { CloneRepoRequest, CompileRepoRequest } from './types/api';
+import type { 
+  CloneRepoRequest, 
+  CompileRepoRequest, 
+  GitCommitRequest, 
+  GitPushRequest
+} from './types/api';
 
 const execAsync = promisify(exec);
 
@@ -417,6 +422,108 @@ app.post('/api/compile', async (req, res) => {
   } catch (err) {
     console.error('Compile error:', err);
     return res.status(500).json({ error: 'Compilation failed' });
+  }
+});
+
+// Git status endpoint
+app.get('/api/git/:userId/:repoName/status', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
+    
+    if (!(await fs.pathExists(repoPath))) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+    
+    const git = simpleGit(repoPath);
+    const status = await git.status();
+    
+    return res.json({
+      modified: status.modified,
+      added: status.created,
+      deleted: status.deleted,
+      untracked: status.not_added,
+      clean: status.isClean(),
+      currentBranch: status.current || 'master',
+      tracking: status.tracking || undefined
+    });
+  } catch (err) {
+    console.error('Git status error:', err);
+    return res.status(500).json({ error: 'Failed to get Git status' });
+  }
+});
+
+// Git commit endpoint
+app.post('/api/git/:userId/:repoName/commit', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    const { message, author } = req.body as GitCommitRequest;
+    
+    if (!message) {
+      return res.status(400).json({ error: 'Commit message is required' });
+    }
+    
+    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
+    
+    if (!(await fs.pathExists(repoPath))) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+    
+    const git = simpleGit(repoPath);
+    
+    // Configure user if provided
+    if (author) {
+      await git.addConfig('user.name', author.name);
+      await git.addConfig('user.email', author.email);
+    }
+    
+    // Add all modified and untracked files
+    await git.add('.');
+    
+    // Commit changes
+    const result = await git.commit(message);
+    
+    return res.json({
+      message: 'Changes committed successfully',
+      hash: result.commit
+    });
+  } catch (err) {
+    console.error('Git commit error:', err);
+    return res.status(500).json({ error: 'Failed to commit changes' });
+  }
+});
+
+// Git push endpoint
+app.post('/api/git/:userId/:repoName/push', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    const { remote = 'origin', branch } = req.body as GitPushRequest;
+    
+    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
+    
+    if (!(await fs.pathExists(repoPath))) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+    
+    const git = simpleGit(repoPath);
+    
+    // Get current branch if not provided
+    let pushBranch = branch;
+    if (!pushBranch) {
+      const status = await git.status();
+      pushBranch = status.current || 'master';
+    }
+    
+    // Push changes
+    await git.push(remote, pushBranch);
+    
+    return res.json({
+      message: 'Changes pushed successfully'
+    });
+  } catch (err) {
+    console.error('Git push error:', err);
+    const errorMessage = err instanceof Error ? err.message : 'Failed to push changes';
+    return res.status(500).json({ error: errorMessage });
   }
 });
 
