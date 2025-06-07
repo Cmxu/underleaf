@@ -33,10 +33,10 @@ export default function EditorPage() {
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       <header
         className="app-header"
-        style={{ padding: '0.5rem', background: '#f5f5f5', display: 'flex', justifyContent: 'space-between' }}
+        style={{ padding: '0.5rem', background: '#1e1e1e', display: 'flex', justifyContent: 'space-between' }}
       >
-        <span>Repo: {repoUrl}</span>
-        <button onClick={handleCompile}>Compile</button>
+        <span style={{ color: '#888888', fontFamily: 'Open Sans, sans-serif' }}>Repo: {repoUrl}</span>
+        <button onClick={handleCompile} style={{ color: '#888888', fontFamily: 'Open Sans, sans-serif' }}>Compile</button>
       </header>
       <div style={{ flex: 1, display: 'flex' }}>
         <aside className="sidebar">
