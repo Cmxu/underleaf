@@ -9,7 +9,7 @@ Underleaf aims to be a comprehensive LaTeX editing platform that combines the po
 ## 🏗️ Architecture Overview
 
 ### Frontend
-- **Framework**: React with TypeScript (recommended) or Next.js for SSR capabilities
+- **Framework**: Svelte with TypeScript
 - **Styling**: Tailwind CSS for modern, responsive design
 - **Editor**: Monaco Editor or CodeMirror for syntax highlighting
 - **PDF Viewer**: PDF.js or react-pdf for rendering
@@ -123,13 +123,13 @@ Underleaf aims to be a comprehensive LaTeX editing platform that combines the po
 ## 🛠️ Technology Stack
 
 ### Frontend Technologies
-- **React 18+** - Component-based UI framework
+- **Svelte** - Component framework
 - **TypeScript** - Type-safe JavaScript
 - **Tailwind CSS** - Utility-first CSS framework
 - **Monaco Editor** - VS Code editor for the web
-- **React Query** - Data fetching and caching
+- **Svelte Query** - Data fetching and caching
 - **Framer Motion** - Animation library
-- **React Hook Form** - Form handling
+- **Svelte Forms** - Form handling
 - **Radix UI** - Accessible component primitives
 
 ### Backend Technologies
@@ -154,11 +154,11 @@ Underleaf aims to be a comprehensive LaTeX editing platform that combines the po
 
 ```
 underleaf/
-├── frontend/                 # React application
+├── frontend/                 # Svelte application
 │   ├── src/
 │   │   ├── components/      # Reusable UI components
 │   │   ├── pages/          # Page components
-│   │   ├── hooks/          # Custom React hooks
+│   │   ├── hooks/          # Custom stores or hooks
 │   │   ├── utils/          # Utility functions
 │   │   ├── stores/         # State management
 │   │   └── types/          # TypeScript definitions
@@ -224,7 +224,7 @@ npm run dev
 - [ ] CI/CD pipeline configuration
 
 **Next Up:**
-- Frontend React application bootstrapping
+- Frontend Svelte application bootstrapping
 - Backend Express server setup
 - Basic Git integration functionality
 - LaTeX compilation pipeline setup

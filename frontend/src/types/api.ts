@@ -20,4 +20,4 @@ export interface CompileRepoResponse {
 
 export interface ApiError {
   error: string;
-} 
+}
