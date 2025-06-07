@@ -6,14 +6,14 @@ export async function cloneRepo(repoUrl: string, userId = 'anonymous'): Promise<
   const res = await fetch(`${API_URL}/api/clone`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ repoUrl, userId }),
+    body: JSON.stringify({ repoUrl, userId })
   });
-  
+
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({ error: 'Unknown error' }));
     throw new Error(errorData.error || 'Failed to clone repository');
   }
-  
+
   return res.json() as Promise<CloneRepoResponse>;
 }
 
@@ -25,13 +25,13 @@ export async function compileRepo(
   const res = await fetch(`${API_URL}/api/compile`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ repoName, userId, texFile }),
+    body: JSON.stringify({ repoName, userId, texFile })
   });
-  
+
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({ error: 'Unknown error' }));
     throw new Error(errorData.error || 'Failed to compile repository');
   }
-  
+
   return res.json() as Promise<CompileRepoResponse>;
 }
