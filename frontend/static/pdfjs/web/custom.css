@@ -1,0 +1,65 @@
+/* Custom CSS to move PDF.js sidebar to the right side */
+
+/* Override default sidebar positioning to place it on the right */
+#sidebarContainer {
+  inset-inline-start: auto !important;
+  inset-inline-end: calc(-1 * var(--sidebar-width)) !important;
+}
+
+/* When sidebar is open, position it on the right edge */
+#outerContainer.sidebarOpen #sidebarContainer {
+  inset-inline-start: auto !important;
+  inset-inline-end: 0 !important;
+}
+
+/* Adjust viewer container to make room for right sidebar */
+#outerContainer.sidebarOpen #viewerContainer:not(.pdfPresentationMode) {
+  inset-inline-start: 0 !important;
+  inset-inline-end: var(--sidebar-width) !important;
+}
+
+/* Adjust loading bar for right sidebar */
+#outerContainer.sidebarOpen #loadingBar {
+  inset-inline-start: 0 !important;
+  inset-inline-end: var(--sidebar-width) !important;
+}
+
+/* Move the sidebar resizer to the left side of the sidebar (now on right) */
+#sidebarResizer {
+  inset-inline-start: -6px !important;
+  inset-inline-end: auto !important;
+}
+
+/* Ensure the sidebar is always open with thumbnails visible */
+#outerContainer {
+  --sidebar-transition-duration: 0s;
+}
+
+/* Auto-open sidebar on load */
+body {
+  --sidebar-width: 200px;
+}
+
+/* Force sidebar to open with thumbnails */
+#outerContainer.sidebarOpen #sidebarContainer {
+  visibility: visible !important;
+}
+
+/* Make sure thumbnail view is active by default */
+#viewThumbnail {
+  background-color: var(--button-secondary-bg-color) !important;
+}
+
+/* On mobile, keep the behavior reasonable */
+@media all and (max-width: 840px) {
+  #outerContainer.sidebarOpen #viewerContainer {
+    inset-inline-end: 0 !important;
+  }
+}
+
+/* Dark theme compatibility */
+@media (prefers-color-scheme: dark) {
+  #sidebarContainer {
+    background-color: #2b2a33;
+  }
+}

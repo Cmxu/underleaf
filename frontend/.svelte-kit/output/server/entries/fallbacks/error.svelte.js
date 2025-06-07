@@ -1,0 +1,2 @@
+import{g as o,e as t,c as p,p as a}from"../../chunks/index.js";import"clsx";import{s as u}from"../../chunks/client.js";u.updated.check;function e(){return o("__request__")}const c={get error(){return e().page.error},get status(){return e().page.status}},r=c;function $(s,n){a(),s.out+=`<h1>${t(r.status)}</h1> <p>${t(r.error?.message)}</p>`,p()}export{$ as default};
+//# sourceMappingURL=error.svelte.js.map

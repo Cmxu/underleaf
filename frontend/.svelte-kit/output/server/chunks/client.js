@@ -1,0 +1,2 @@
+import"clsx";import{w as r}from"./exports.js";import{n as e}from"./equality.js";const n="sveltekit:snapshot",a="sveltekit:scroll";function c(){const{set:s,subscribe:t}=r(!1);return{subscribe:t,check:async()=>!1}}const i=e.toString().includes("$$")||/function \w+\(\) \{\}/.test(e.toString());i&&new URL("https://example.com");function o(s,t=JSON.parse){try{return t(sessionStorage[s])}catch{}}o(a);o(n);const f={updated:c()};export{f as s};
+//# sourceMappingURL=client.js.map

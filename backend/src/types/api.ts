@@ -16,6 +16,33 @@ export interface CompileRepoRequest {
 
 export interface CompileRepoResponse {
   message: string;
+  pdfFile?: string;
+  pdfUrl?: string;
+}
+
+export interface FileTreeItem {
+  name: string;
+  type: 'file' | 'directory';
+  path: string;
+  size?: number;
+  children?: FileTreeItem[];
+}
+
+export interface FileTreeResponse {
+  tree: FileTreeItem[];
+}
+
+export interface FileContentResponse {
+  content: string;
+}
+
+export interface SaveFileRequest {
+  filePath: string;
+  content: string;
+}
+
+export interface SaveFileResponse {
+  message: string;
 }
 
 export interface ApiErrorResponse {
