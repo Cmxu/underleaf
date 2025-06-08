@@ -1,11 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { page } from '$app/stores';
 	import FileTree from '$components/FileTree.svelte';
 	import PdfPreview from '$components/PdfPreview.svelte';
 	import { apiClient } from '$lib/utils/api';
-	
+
 	let editorContainer: HTMLDivElement;
 	let monacoEditor: any = null;
 	let monaco: any = null;
@@ -17,13 +16,20 @@
 	let unsavedChanges = false;
 	let autoSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let pdfUrl: string | null = null;
-	
+
+	// Layout state
+	let layoutMode: 'both' | 'editor' | 'pdf' = 'both';
+	let fileTreeWidth = 256; // 16rem in pixels
+	let editorWidth = 50; // percentage for editor when in 'both' mode
+	let isResizing = false;
+	let resizingPanel: 'filetree' | 'editor-pdf' | 'git-split' | null = null;
+	let gitPanelHeight = 40; // percentage for git panel height within sidebar
+
 	// Git state
 	let gitStatus: any = null;
 	let isCommitting = false;
 	let isPushing = false;
 	let commitMessage = '';
-	let showGitPanel = false;
 	let commitSuccess = false;
 	let pushSuccess = false;
 	let gitError: string | null = null;
@@ -33,7 +39,7 @@
 		// Try to get repository name from URL params or localStorage
 		const searchParams = new URLSearchParams(window.location.search);
 		currentRepoName = searchParams.get('repo') || localStorage.getItem('currentRepo');
-		
+
 		if (!currentRepoName) {
 			// Redirect to home if no repository is specified
 			goto('/');
@@ -41,23 +47,26 @@
 		}
 
 		await initializeMonaco();
+		
+		// Load git status on mount
+		await handleRefreshGitStatus();
 	});
 
 	async function initializeMonaco() {
 		try {
 			const monacoLoader = await import('@monaco-editor/loader');
 			monacoLoader.default.config({
-				paths: { 
-					vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' 
+				paths: {
+					vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs'
 				}
 			});
-			
+
 			monaco = await monacoLoader.default.init();
-			
+
 			// Register LaTeX language if not already registered
 			if (!monaco.languages.getLanguages().find((lang: any) => lang.id === 'latex')) {
 				monaco.languages.register({ id: 'latex' });
-				
+
 				// Basic LaTeX syntax highlighting
 				monaco.languages.setMonarchTokensProvider('latex', {
 					tokenizer: {
@@ -66,14 +75,15 @@
 							[/\{[^}]*\}/, 'string'],
 							[/%.*$/, 'comment'],
 							[/\$[^$]*\$/, 'number'], // Math mode
-							[/\$\$[^$]*\$\$/, 'number'], // Display math
+							[/\$\$[^$]*\$\$/, 'number'] // Display math
 						]
 					}
 				});
 			}
-			
+
 			monacoEditor = monaco.editor.create(editorContainer, {
-				value: '% Welcome to Underleaf!\n% Select a file from the file tree to start editing\n\n\\documentclass{article}\n\\usepackage[utf8]{inputenc}\n\\usepackage[T1]{fontenc}\n\\usepackage{amsmath}\n\\usepackage{amsfonts}\n\\usepackage{amssymb}\n\\usepackage{graphicx}\n\n\\title{Your Document Title}\n\\author{Your Name}\n\\date{\\today}\n\n\\begin{document}\n\n\\maketitle\n\n\\section{Introduction}\n\nYour content here...\n\n\\end{document}',
+				value:
+					'% Welcome to Underleaf!\n% Select a file from the file tree to start editing\n\n\\documentclass{article}\n\\usepackage[utf8]{inputenc}\n\\usepackage[T1]{fontenc}\n\\usepackage{amsmath}\n\\usepackage{amsfonts}\n\\usepackage{amssymb}\n\\usepackage{graphicx}\n\n\\title{Your Document Title}\n\\author{Your Name}\n\\date{\\today}\n\n\\begin{document}\n\n\\maketitle\n\n\\section{Introduction}\n\nYour content here...\n\n\\end{document}',
 				language: 'latex',
 				theme: 'vs-dark',
 				fontSize: 14,
@@ -94,11 +104,11 @@
 			// Auto-save on content change
 			monacoEditor.onDidChangeModelContent(() => {
 				unsavedChanges = true;
-				
+
 				if (autoSaveTimeout) {
 					clearTimeout(autoSaveTimeout);
 				}
-				
+
 				autoSaveTimeout = setTimeout(() => {
 					if (currentFilePath && unsavedChanges) {
 						handleSaveFile();
@@ -111,6 +121,12 @@
 				handleSaveFile();
 			});
 
+			// Ensure editor layout is correct after initialization
+			setTimeout(() => {
+				if (monacoEditor) {
+					monacoEditor.layout();
+				}
+			}, 100);
 		} catch (error) {
 			console.error('Failed to initialize Monaco Editor:', error);
 		}
@@ -118,24 +134,30 @@
 
 	async function handleFileSelect(filePath: string) {
 		if (!currentRepoName) return;
-		
+
 		try {
 			const response = await apiClient.getFileContent(currentRepoName, filePath);
-			
+
 			if (monacoEditor) {
 				monacoEditor.setValue(response.content);
 				currentFilePath = filePath;
 				unsavedChanges = false;
 				compileError = null;
 				compileSuccess = false;
-				
+
 				// Set language based on file extension
 				const ext = filePath.split('.').pop()?.toLowerCase();
-				const language = ext === 'tex' ? 'latex' : 
-								 ext === 'bib' ? 'bibtex' :
-								 ext === 'md' ? 'markdown' :
-								 ext === 'json' ? 'json' : 'plaintext';
-				
+				const language =
+					ext === 'tex'
+						? 'latex'
+						: ext === 'bib'
+							? 'bibtex'
+							: ext === 'md'
+								? 'markdown'
+								: ext === 'json'
+									? 'json'
+									: 'plaintext';
+
 				monaco.editor.setModelLanguage(monacoEditor.getModel(), language);
 			}
 		} catch (err) {
@@ -145,12 +167,12 @@
 
 	async function handleSaveFile() {
 		if (!currentRepoName || !currentFilePath || !monacoEditor) return;
-		
+
 		try {
 			const content = monacoEditor.getValue();
 			await apiClient.saveFile(currentRepoName, currentFilePath, content);
 			unsavedChanges = false;
-			
+
 			if (autoSaveTimeout) {
 				clearTimeout(autoSaveTimeout);
 				autoSaveTimeout = null;
@@ -162,7 +184,7 @@
 
 	async function handleCompile() {
 		if (!currentRepoName) return;
-		
+
 		isCompiling = true;
 		compileError = null;
 		compileSuccess = false;
@@ -176,12 +198,12 @@
 			const texFile = currentFilePath?.endsWith('.tex') ? currentFilePath : 'main.tex';
 			const result = await apiClient.compileRepo(currentRepoName, 'anonymous', texFile);
 			compileSuccess = true;
-			
+
 			if (result.pdfUrl) {
 				// Use relative URL since we're proxying through Vite
 				pdfUrl = result.pdfUrl;
 			}
-			
+
 			console.log('Compilation successful:', result);
 		} catch (err) {
 			compileError = err instanceof Error ? err.message : 'Compilation failed';
@@ -199,7 +221,7 @@
 
 	async function handleRefreshGitStatus() {
 		if (!currentRepoName) return;
-		
+
 		try {
 			gitStatus = await apiClient.getGitStatus(currentRepoName);
 			gitError = null;
@@ -210,7 +232,7 @@
 
 	async function handleCommit() {
 		if (!currentRepoName || !commitMessage.trim()) return;
-		
+
 		isCommitting = true;
 		commitSuccess = false;
 		gitError = null;
@@ -219,10 +241,10 @@
 			await apiClient.commitChanges(currentRepoName, commitMessage.trim());
 			commitSuccess = true;
 			commitMessage = '';
-			
+
 			// Refresh Git status after committing
 			await handleRefreshGitStatus();
-			
+
 			// Clear success message after 3 seconds
 			setTimeout(() => {
 				commitSuccess = false;
@@ -236,7 +258,7 @@
 
 	async function handlePush() {
 		if (!currentRepoName) return;
-		
+
 		isPushing = true;
 		pushSuccess = false;
 		gitError = null;
@@ -244,7 +266,7 @@
 		try {
 			await apiClient.pushChanges(currentRepoName);
 			pushSuccess = true;
-			
+
 			// Clear success message after 3 seconds
 			setTimeout(() => {
 				pushSuccess = false;
@@ -256,16 +278,76 @@
 		}
 	}
 
-	function toggleGitPanel() {
-		showGitPanel = !showGitPanel;
-		if (showGitPanel && currentRepoName) {
-			handleRefreshGitStatus();
-		}
-	}
 
 	function getFileNameFromPath(path: string | null): string {
 		if (!path) return 'Untitled';
 		return path.split('/').pop() || path;
+	}
+
+	// Layout functions
+	function setLayoutMode(mode: 'both' | 'editor' | 'pdf') {
+		layoutMode = mode;
+		// Trigger Monaco editor resize after layout change
+		setTimeout(() => {
+			if (monacoEditor) {
+				monacoEditor.layout();
+			}
+		}, 100);
+	}
+
+	// Resize functions
+	function startResize(panel: 'filetree' | 'editor-pdf' | 'git-split', event: MouseEvent) {
+		isResizing = true;
+		resizingPanel = panel;
+		event.preventDefault();
+
+		document.addEventListener('mousemove', handleResize);
+		document.addEventListener('mouseup', stopResize);
+	}
+
+	function handleResize(event: MouseEvent) {
+		if (!isResizing || !resizingPanel) return;
+
+		const newX = event.clientX;
+		const newY = event.clientY;
+
+		if (resizingPanel === 'filetree') {
+			const minWidth = 200;
+			const maxWidth = 500;
+			fileTreeWidth = Math.min(Math.max(newX, minWidth), maxWidth);
+		} else if (resizingPanel === 'editor-pdf') {
+			// Calculate percentage based on the main content area
+			const mainArea = document.querySelector('.main-content-area') as HTMLElement;
+			if (mainArea) {
+				const rect = mainArea.getBoundingClientRect();
+				const relativeX = newX - rect.left;
+				const percentage = (relativeX / rect.width) * 100;
+				editorWidth = Math.min(Math.max(percentage, 20), 80); // 20% to 80% range
+
+				// Trigger Monaco editor resize
+				setTimeout(() => {
+					if (monacoEditor) {
+						monacoEditor.layout();
+					}
+				}, 10);
+			}
+		} else if (resizingPanel === 'git-split') {
+			// Calculate percentage based on the sidebar height
+			const sidebar = document.querySelector('aside') as HTMLElement;
+			if (sidebar) {
+				const rect = sidebar.getBoundingClientRect();
+				const relativeY = newY - rect.top;
+				const percentage = ((rect.height - relativeY) / rect.height) * 100;
+				gitPanelHeight = Math.min(Math.max(percentage, 20), 70); // 20% to 70% range
+			}
+		}
+	}
+
+	function stopResize() {
+		isResizing = false;
+		resizingPanel = null;
+		document.removeEventListener('mousemove', handleResize);
+		document.removeEventListener('mouseup', stopResize);
 	}
 </script>
 
@@ -283,7 +365,12 @@
 				aria-label="Go back to home"
 			>
 				<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+					<path
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						stroke-width="2"
+						d="M10 19l-7-7m0 0l7-7m-7 7h18"
+					/>
 				</svg>
 			</button>
 			<div>
@@ -295,6 +382,37 @@
 		</div>
 
 		<div class="flex items-center space-x-4">
+			<!-- Layout Toggle Buttons -->
+			<div class="flex items-center space-x-1 bg-dark-700 rounded p-1">
+				<button
+					on:click={() => setLayoutMode('editor')}
+					class="px-3 py-1.5 text-xs rounded transition-colors {layoutMode === 'editor'
+						? 'bg-blue-600 text-white'
+						: 'text-gray-400 hover:text-white hover:bg-gray-600'}"
+					title="Editor only"
+				>
+					Editor
+				</button>
+				<button
+					on:click={() => setLayoutMode('both')}
+					class="px-3 py-1.5 text-xs rounded transition-colors {layoutMode === 'both'
+						? 'bg-blue-600 text-white'
+						: 'text-gray-400 hover:text-white hover:bg-gray-600'}"
+					title="Side by side"
+				>
+					Both
+				</button>
+				<button
+					on:click={() => setLayoutMode('pdf')}
+					class="px-3 py-1.5 text-xs rounded transition-colors {layoutMode === 'pdf'
+						? 'bg-blue-600 text-white'
+						: 'text-gray-400 hover:text-white hover:bg-gray-600'}"
+					title="PDF only"
+				>
+					PDF
+				</button>
+			</div>
+
 			{#if currentFilePath}
 				<div class="text-sm text-gray-300 flex items-center space-x-2">
 					<span>📄</span>
@@ -304,16 +422,19 @@
 					{/if}
 				</div>
 			{/if}
-			
+
 			{#if compileSuccess}
 				<div class="text-green-400 text-sm flex items-center space-x-2">
 					<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-						<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"/>
+						<path
+							fill-rule="evenodd"
+							d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+						/>
 					</svg>
 					<span>Compiled successfully</span>
 				</div>
 			{/if}
-			
+
 			{#if currentFilePath}
 				<button
 					on:click={handleSaveFile}
@@ -323,11 +444,16 @@
 					aria-label="Save file"
 				>
 					<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3-3m0 0l-3 3m3-3v12"/>
+						<path
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							stroke-width="2"
+							d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3-3m0 0l-3 3m3-3v12"
+						/>
 					</svg>
 				</button>
 			{/if}
-			
+
 			<button
 				on:click={handleCompile}
 				disabled={isCompiling || !currentRepoName}
@@ -342,31 +468,39 @@
 					Compile PDF
 				{/if}
 			</button>
-			
-			<button
-				on:click={toggleGitPanel}
-				class="text-gray-400 hover:text-white transition-colors p-2 rounded {showGitPanel ? 'bg-gray-700' : ''}"
-				title="Git Operations"
-				aria-label="Git Operations"
-			>
-				<svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-					<path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/>
-					<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z"/>
-				</svg>
-			</button>
+
 		</div>
 	</header>
 
 	<!-- Main Editor Area -->
 	<div class="flex-1 flex overflow-hidden">
-		<!-- File Tree Sidebar -->
-		<aside class="w-64 bg-dark-800 border-r border-gray-700 overflow-y-auto">
-			<FileTree repoName={currentRepoName} onFileSelect={handleFileSelect} />
-		</aside>
-
-		<!-- Git Panel -->
-		{#if showGitPanel}
-			<aside class="w-80 bg-dark-800 border-r border-gray-700 overflow-y-auto">
+		<!-- File Tree + Git Sidebar -->
+		<aside
+			class="bg-dark-800 border-r border-gray-700 relative flex flex-col"
+			style="width: {fileTreeWidth}px;"
+		>
+			<!-- File Tree (Top Half) -->
+			<div 
+				class="overflow-y-auto border-b border-gray-700"
+				style="height: {100 - gitPanelHeight}%;"
+			>
+				<FileTree repoName={currentRepoName} onFileSelect={handleFileSelect} />
+			</div>
+			
+			<!-- Git Panel Resize Handle -->
+			<div
+				role="separator"
+				tabindex="0"
+				aria-label="Resize git panel"
+				class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors"
+				on:mousedown={(e) => startResize('git-split', e)}
+			></div>
+			
+			<!-- Git Panel (Bottom Half) -->
+			<div 
+				class="overflow-y-auto"
+				style="height: {gitPanelHeight}%;"
+			>
 				<div class="p-4">
 					<div class="flex items-center justify-between mb-4">
 						<h3 class="text-lg font-medium text-white">Git Operations</h3>
@@ -374,9 +508,15 @@
 							on:click={handleRefreshGitStatus}
 							class="text-gray-400 hover:text-white transition-colors"
 							title="Refresh Git status"
+							aria-label="Refresh Git status"
 						>
 							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									stroke-width="2"
+									d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+								/>
 							</svg>
 						</button>
 					</div>
@@ -405,7 +545,10 @@
 							<div class="mb-3 pb-2 border-b border-gray-600">
 								<p class="text-blue-400 text-sm">
 									<svg class="w-4 h-4 inline mr-1" fill="currentColor" viewBox="0 0 20 20">
-										<path fill-rule="evenodd" d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 11-1.414 1.414L2.586 7l3.707-3.707a1 1 0 011.414 0z"/>
+										<path
+											fill-rule="evenodd"
+											d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 11-1.414 1.414L2.586 7l3.707-3.707a1 1 0 011.414 0z"
+										/>
 									</svg>
 									Branch: {gitStatus.currentBranch}
 								</p>
@@ -419,7 +562,9 @@
 								<div class="space-y-2">
 									{#if gitStatus.modified.length > 0}
 										<div>
-											<p class="text-yellow-400 text-sm font-medium">Modified ({gitStatus.modified.length})</p>
+											<p class="text-yellow-400 text-sm font-medium">
+												Modified ({gitStatus.modified.length})
+											</p>
 											{#each gitStatus.modified as file}
 												<p class="text-gray-400 text-xs ml-2">• {file}</p>
 											{/each}
@@ -427,7 +572,9 @@
 									{/if}
 									{#if gitStatus.untracked.length > 0}
 										<div>
-											<p class="text-red-400 text-sm font-medium">Untracked ({gitStatus.untracked.length})</p>
+											<p class="text-red-400 text-sm font-medium">
+												Untracked ({gitStatus.untracked.length})
+											</p>
 											{#each gitStatus.untracked as file}
 												<p class="text-gray-400 text-xs ml-2">• {file}</p>
 											{/each}
@@ -435,7 +582,9 @@
 									{/if}
 									{#if gitStatus.added.length > 0}
 										<div>
-											<p class="text-green-400 text-sm font-medium">Added ({gitStatus.added.length})</p>
+											<p class="text-green-400 text-sm font-medium">
+												Added ({gitStatus.added.length})
+											</p>
 											{#each gitStatus.added as file}
 												<p class="text-gray-400 text-xs ml-2">• {file}</p>
 											{/each}
@@ -443,7 +592,9 @@
 									{/if}
 									{#if gitStatus.deleted.length > 0}
 										<div>
-											<p class="text-red-400 text-sm font-medium">Deleted ({gitStatus.deleted.length})</p>
+											<p class="text-red-400 text-sm font-medium">
+												Deleted ({gitStatus.deleted.length})
+											</p>
 											{#each gitStatus.deleted as file}
 												<p class="text-gray-400 text-xs ml-2">• {file}</p>
 											{/each}
@@ -501,44 +652,78 @@
 						{/if}
 					</button>
 				</div>
-			</aside>
-		{/if}
-
-		<!-- Editor -->
-		<div class="flex-1 flex flex-col">
-			{#if currentFilePath}
-				<div class="bg-dark-700 px-4 py-2 border-b border-gray-600 text-sm text-gray-300 flex items-center justify-between">
-					<span>Editing: {getFileNameFromPath(currentFilePath)}</span>
-					<span class="text-xs text-gray-500">Auto-save enabled</span>
-				</div>
-			{/if}
-			
-			<div class="flex-1 relative">
-				<div bind:this={editorContainer} class="w-full h-full"></div>
 			</div>
 			
-			{#if compileError}
-				<div class="bg-red-500/10 border-t border-red-500/20 p-4 text-red-300">
-					<div class="flex items-start space-x-2">
-						<svg class="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-							<path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"/>
-						</svg>
-						<div>
-							<p class="font-medium">Compilation Error</p>
-							<p class="text-sm text-red-200 mt-1">{compileError}</p>
+			<!-- Sidebar Resize Handle -->
+			<div
+				role="separator"
+				tabindex="0"
+				aria-label="Resize file tree panel"
+				class="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 bg-transparent transition-colors"
+				on:mousedown={(e) => startResize('filetree', e)}
+			></div>
+		</aside>
+
+		<!-- Main Content Area (Editor + PDF) -->
+		<div class="flex-1 flex main-content-area">
+			<!-- Editor -->
+			{#if layoutMode === 'editor' || layoutMode === 'both'}
+				<div
+					class="flex flex-col {layoutMode === 'both' ? '' : 'flex-1'}"
+					style={layoutMode === 'both' ? `width: ${editorWidth}%` : ''}
+				>
+					{#if currentFilePath}
+						<div
+							class="bg-dark-700 px-4 py-2 border-b border-gray-600 text-sm text-gray-300 flex items-center justify-between"
+						>
+							<span>Editing: {getFileNameFromPath(currentFilePath)}</span>
+							<span class="text-xs text-gray-500">Auto-save enabled</span>
 						</div>
+					{/if}
+
+					<div class="flex-1 relative">
+						<div bind:this={editorContainer} class="w-full h-full"></div>
 					</div>
+
+					{#if compileError}
+						<div class="bg-red-500/10 border-t border-red-500/20 p-4 text-red-300">
+							<div class="flex items-start space-x-2">
+								<svg class="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+									<path
+										fill-rule="evenodd"
+										d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
+									/>
+								</svg>
+								<div>
+									<p class="font-medium">Compilation Error</p>
+									<p class="text-sm text-red-200 mt-1">{compileError}</p>
+								</div>
+							</div>
+						</div>
+					{/if}
+				</div>
+			{/if}
+
+			<!-- Resize Handle between Editor and PDF -->
+			{#if layoutMode === 'both'}
+				<div
+					role="separator"
+					tabindex="0"
+					aria-label="Resize editor and PDF panels"
+					class="w-1 bg-gray-600 hover:bg-blue-500 cursor-col-resize transition-colors relative"
+					on:mousedown={(e) => startResize('editor-pdf', e)}
+				></div>
+			{/if}
+
+			<!-- PDF Preview -->
+			{#if layoutMode === 'pdf' || layoutMode === 'both'}
+				<div
+					class="flex-1 border-l border-gray-700"
+					style={layoutMode === 'both' ? `width: ${100 - editorWidth}%` : ''}
+				>
+					<PdfPreview {pdfUrl} isLoading={isCompiling} error={compileError} />
 				</div>
 			{/if}
 		</div>
-
-		<!-- PDF Preview -->
-		<aside class="w-1/2 border-l border-gray-700">
-			<PdfPreview 
-				{pdfUrl} 
-				isLoading={isCompiling} 
-				error={compileError} 
-			/>
-		</aside>
 	</div>
 </div>
