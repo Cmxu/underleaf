@@ -25,10 +25,10 @@
 
 	async function loadFileTree() {
 		if (!repoName) return;
-		
+
 		loading = true;
 		error = null;
-		
+
 		try {
 			const response = await apiClient.getFileTree(repoName);
 			fileTree = response.tree;
@@ -75,7 +75,7 @@
 			<div class="p-4 text-center">
 				<p class="text-red-400 text-sm mb-2">⚠️ Error loading files</p>
 				<p class="text-gray-400 text-xs">{error}</p>
-				<button 
+				<button
 					on:click={loadFileTree}
 					class="mt-2 text-blue-400 hover:text-blue-300 text-sm underline"
 				>
@@ -94,8 +94,8 @@
 			</div>
 		{:else}
 			{#each fileTree as item}
-				<FileTreeNode 
-					{item} 
+				<FileTreeNode
+					{item}
 					depth={0}
 					{expandedDirs}
 					{selectedFile}

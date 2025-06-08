@@ -7,7 +7,7 @@
 	html {
 		color-scheme: dark;
 	}
-	
+
 	body {
 		@apply bg-dark-800 text-white font-sans antialiased;
 		@apply min-h-screen min-w-[320px];
@@ -23,11 +23,11 @@
 		@apply border border-transparent hover:border-gray-600;
 		@apply transform hover:-translate-y-0.5;
 	}
-	
+
 	.btn-primary:disabled {
 		@apply opacity-50 cursor-not-allowed transform-none;
 	}
-	
+
 	.input-primary {
 		@apply bg-white/95 backdrop-blur-sm;
 		@apply border border-white/20 rounded-2xl;
@@ -38,7 +38,7 @@
 		@apply focus:bg-white focus:outline-none focus:ring-2 focus:ring-white/30;
 		@apply hover:bg-white/98 hover:-translate-y-0.5;
 	}
-	
+
 	.loading-spinner {
 		@apply w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin;
 	}
@@ -48,8 +48,39 @@
 	.text-shadow {
 		text-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
 	}
-	
+
 	.backdrop-blur-glass {
 		backdrop-filter: blur(10px);
+	}
+
+	/* Performance optimizations for resizing */
+	.gpu-accelerated {
+		transform: translateZ(0);
+		will-change: transform;
+	}
+
+	.resize-optimized {
+		contain: layout style;
+		isolation: isolate;
+	}
+
+	/* Smooth resizing for panels */
+	.panel-transition {
+		transition: width 0.1s ease-out;
+		transform: translateZ(0);
+	}
+
+	/* Force hardware acceleration on main panels */
+	.main-content-area > * {
+		transform: translateZ(0);
+	}
+
+	/* Ensure consistent resize cursor during operations */
+	body.resizing-editor-pdf {
+		cursor: col-resize !important;
+	}
+
+	body.resizing-editor-pdf * {
+		cursor: col-resize !important;
 	}
 }

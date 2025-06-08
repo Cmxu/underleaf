@@ -1,18 +1,18 @@
 import { browser } from '$app/environment';
-import type { 
-	CloneRepoResponse, 
-	CompileRepoResponse, 
-	FileTreeResponse, 
+import type {
+	CloneRepoResponse,
+	CompileRepoResponse,
+	FileTreeResponse,
 	FileContentResponse,
 	SaveFileResponse,
 	GitCommitResponse,
 	GitPushResponse,
-	GitStatusResponse
+	GitStatusResponse,
+	GitFetchResponse,
+	GitPullResponse
 } from '$types/api';
 
-const API_URL = browser 
-	? (import.meta.env.VITE_API_URL || '')
-	: 'http://localhost:3001';
+const API_URL = browser ? import.meta.env.VITE_API_URL || '' : 'http://localhost:3001';
 
 class ApiClient {
 	private baseUrl: string;
@@ -23,7 +23,7 @@ class ApiClient {
 
 	private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
 		const url = `${this.baseUrl}${endpoint}`;
-		
+
 		const response = await fetch(url, {
 			headers: {
 				'Content-Type': 'application/json',
@@ -63,8 +63,8 @@ class ApiClient {
 	}
 
 	async getFileContent(
-		repoName: string, 
-		filePath: string, 
+		repoName: string,
+		filePath: string,
 		userId = 'anonymous'
 	): Promise<FileContentResponse> {
 		const params = new URLSearchParams({ filePath });
@@ -83,10 +83,7 @@ class ApiClient {
 		});
 	}
 
-	async getGitStatus(
-		repoName: string,
-		userId = 'anonymous'
-	): Promise<GitStatusResponse> {
+	async getGitStatus(repoName: string, userId = 'anonymous'): Promise<GitStatusResponse> {
 		return this.request<GitStatusResponse>(`/api/git/${userId}/${repoName}/status`);
 	}
 
@@ -108,11 +105,38 @@ class ApiClient {
 		remote = 'origin',
 		branch?: string
 	): Promise<GitPushResponse> {
-		const body: any = { remote };
+		const body: { remote: string; branch?: string } = { remote };
 		if (branch) {
 			body.branch = branch;
 		}
 		return this.request<GitPushResponse>(`/api/git/${userId}/${repoName}/push`, {
+			method: 'POST',
+			body: JSON.stringify(body)
+		});
+	}
+
+	async fetchChanges(
+		repoName: string,
+		userId = 'anonymous',
+		remote = 'origin'
+	): Promise<GitFetchResponse> {
+		return this.request<GitFetchResponse>(`/api/git/${userId}/${repoName}/fetch`, {
+			method: 'POST',
+			body: JSON.stringify({ remote })
+		});
+	}
+
+	async pullChanges(
+		repoName: string,
+		userId = 'anonymous',
+		remote = 'origin',
+		branch?: string
+	): Promise<GitPullResponse> {
+		const body: { remote: string; branch?: string } = { remote };
+		if (branch) {
+			body.branch = branch;
+		}
+		return this.request<GitPullResponse>(`/api/git/${userId}/${repoName}/pull`, {
 			method: 'POST',
 			body: JSON.stringify(body)
 		});

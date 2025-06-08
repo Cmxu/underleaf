@@ -12,7 +12,7 @@
 		if (item.type === 'directory') {
 			return expandedDirs.has(item.path) ? '📂' : '📁';
 		}
-		
+
 		const ext = item.name.split('.').pop()?.toLowerCase();
 		switch (ext) {
 			case 'tex':
@@ -53,8 +53,8 @@
 		</button>
 		{#if expandedDirs.has(item.path) && item.children}
 			{#each item.children as child}
-				<svelte:self 
-					item={child} 
+				<svelte:self
+					item={child}
 					depth={depth + 1}
 					{expandedDirs}
 					{selectedFile}

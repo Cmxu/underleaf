@@ -86,6 +86,19 @@ export interface GitStatusResponse {
 	tracking?: string;
 }
 
+export interface GitFetchResponse {
+	message: string;
+}
+
+export interface GitPullResponse {
+	message: string;
+	summary?: {
+		changes: number;
+		insertions: number;
+		deletions: number;
+	};
+}
+
 export interface ApiError {
 	error: string;
 }

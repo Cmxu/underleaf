@@ -527,6 +527,68 @@ app.post('/api/git/:userId/:repoName/push', async (req, res) => {
   }
 });
 
+// Git fetch endpoint
+app.post('/api/git/:userId/:repoName/fetch', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    const { remote = 'origin' } = req.body;
+    
+    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
+    
+    if (!(await fs.pathExists(repoPath))) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+    
+    const git = simpleGit(repoPath);
+    
+    // Fetch changes from remote
+    await git.fetch(remote);
+    
+    return res.json({
+      message: 'Fetched changes successfully'
+    });
+  } catch (err) {
+    console.error('Git fetch error:', err);
+    const errorMessage = err instanceof Error ? err.message : 'Failed to fetch changes';
+    return res.status(500).json({ error: errorMessage });
+  }
+});
+
+// Git pull endpoint
+app.post('/api/git/:userId/:repoName/pull', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    const { remote = 'origin', branch } = req.body;
+    
+    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
+    
+    if (!(await fs.pathExists(repoPath))) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+    
+    const git = simpleGit(repoPath);
+    
+    // Get current branch if not provided
+    let pullBranch = branch;
+    if (!pullBranch) {
+      const status = await git.status();
+      pullBranch = status.current || 'master';
+    }
+    
+    // Pull changes from remote
+    const pullResult = await git.pull(remote, pullBranch);
+    
+    return res.json({
+      message: 'Pulled changes successfully',
+      summary: pullResult.summary
+    });
+  } catch (err) {
+    console.error('Git pull error:', err);
+    const errorMessage = err instanceof Error ? err.message : 'Failed to pull changes';
+    return res.status(500).json({ error: errorMessage });
+  }
+});
+
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });

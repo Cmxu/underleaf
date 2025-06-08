@@ -14,8 +14,8 @@ window.addEventListener('unhandledrejection', (event) => {
 
 // Performance monitoring (development only)
 if (dev) {
-	let startTime = performance.now();
-	
+	const startTime = performance.now();
+
 	window.addEventListener('load', () => {
 		const loadTime = performance.now() - startTime;
 		console.log(`🚀 App loaded in ${loadTime.toFixed(2)}ms`);

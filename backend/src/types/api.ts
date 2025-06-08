@@ -86,6 +86,28 @@ export interface GitStatusResponse {
   tracking?: string;
 }
 
+export interface GitFetchRequest {
+  repoName: string;
+  userId?: string;
+  remote?: string;
+}
+
+export interface GitFetchResponse {
+  message: string;
+}
+
+export interface GitPullRequest {
+  repoName: string;
+  userId?: string;
+  remote?: string;
+  branch?: string;
+}
+
+export interface GitPullResponse {
+  message: string;
+  summary?: any;
+}
+
 export interface ApiErrorResponse {
   error: string;
 } 

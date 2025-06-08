@@ -4,10 +4,11 @@
 	import FileTree from '$components/FileTree.svelte';
 	import PdfPreview from '$components/PdfPreview.svelte';
 	import { apiClient } from '$lib/utils/api';
+	import type { GitStatusResponse } from '$lib/types/api';
 
 	let editorContainer: HTMLDivElement;
-	let monacoEditor: any = null;
-	let monaco: any = null;
+	let monacoEditor: any = null; // eslint-disable-line @typescript-eslint/no-explicit-any
+	let monaco: any = null; // eslint-disable-line @typescript-eslint/no-explicit-any
 	let isCompiling = false;
 	let compileError: string | null = null;
 	let compileSuccess = false;
@@ -26,13 +27,30 @@
 	let gitPanelHeight = 40; // percentage for git panel height within sidebar
 
 	// Git state
-	let gitStatus: any = null;
+	let gitStatus: GitStatusResponse | null = null;
 	let isCommitting = false;
 	let isPushing = false;
+	let isFetching = false;
+	let isPulling = false;
 	let commitMessage = '';
 	let commitSuccess = false;
 	let pushSuccess = false;
+	let fetchSuccess = false;
+	let pullSuccess = false;
 	let gitError: string | null = null;
+
+	// Reactive statement to handle layout mode changes
+	$: if (monacoEditor && (layoutMode === 'editor' || layoutMode === 'both')) {
+		// Use a small delay to ensure DOM has updated
+		setTimeout(() => {
+			if (monacoEditor && editorContainer) {
+				const rect = editorContainer.getBoundingClientRect();
+				if (rect.width > 0 && rect.height > 0) {
+					monacoEditor.layout();
+				}
+			}
+		}, 50);
+	}
 
 	// Get repo name from URL params or localStorage
 	onMount(async () => {
@@ -47,7 +65,7 @@
 		}
 
 		await initializeMonaco();
-		
+
 		// Load git status on mount
 		await handleRefreshGitStatus();
 	});
@@ -64,7 +82,7 @@
 			monaco = await monacoLoader.default.init();
 
 			// Register LaTeX language if not already registered
-			if (!monaco.languages.getLanguages().find((lang: any) => lang.id === 'latex')) {
+			if (!monaco.languages.getLanguages().find((lang: any) => lang.id === 'latex')) { // eslint-disable-line @typescript-eslint/no-explicit-any
 				monaco.languages.register({ id: 'latex' });
 
 				// Basic LaTeX syntax highlighting
@@ -278,6 +296,56 @@
 		}
 	}
 
+	async function handleFetch() {
+		if (!currentRepoName) return;
+
+		isFetching = true;
+		fetchSuccess = false;
+		gitError = null;
+
+		try {
+			await apiClient.fetchChanges(currentRepoName);
+			fetchSuccess = true;
+
+			// Refresh Git status after fetching
+			await handleRefreshGitStatus();
+
+			// Clear success message after 3 seconds
+			setTimeout(() => {
+				fetchSuccess = false;
+			}, 3000);
+		} catch (err) {
+			gitError = err instanceof Error ? err.message : 'Failed to fetch changes';
+		} finally {
+			isFetching = false;
+		}
+	}
+
+	async function handlePull() {
+		if (!currentRepoName) return;
+
+		isPulling = true;
+		pullSuccess = false;
+		gitError = null;
+
+		try {
+			await apiClient.pullChanges(currentRepoName);
+			pullSuccess = true;
+
+			// Refresh Git status after pulling
+			await handleRefreshGitStatus();
+			// Note: File tree will be updated automatically due to reactive statements
+
+			// Clear success message after 3 seconds
+			setTimeout(() => {
+				pullSuccess = false;
+			}, 3000);
+		} catch (err) {
+			gitError = err instanceof Error ? err.message : 'Failed to pull changes';
+		} finally {
+			isPulling = false;
+		}
+	}
 
 	function getFileNameFromPath(path: string | null): string {
 		if (!path) return 'Untitled';
@@ -286,23 +354,140 @@
 
 	// Layout functions
 	function setLayoutMode(mode: 'both' | 'editor' | 'pdf') {
+		const previousMode = layoutMode;
 		layoutMode = mode;
-		// Trigger Monaco editor resize after layout change
-		setTimeout(() => {
+
+		// If switching from PDF-only to a mode that includes the editor, recreate the editor
+		if (previousMode === 'pdf' && (mode === 'editor' || mode === 'both')) {
+			console.log('Switching from PDF to editor mode, recreating editor...');
+
+			// Store current content
+			const currentContent = monacoEditor ? monacoEditor.getValue() : '';
+			const currentLanguage = monacoEditor ? monacoEditor.getModel()?.getLanguageId() : 'latex';
+
+			// Dispose and recreate the editor
 			if (monacoEditor) {
-				monacoEditor.layout();
+				monacoEditor.dispose();
+				monacoEditor = null;
 			}
-		}, 100);
+
+			// Wait for DOM to update, then recreate
+			setTimeout(async () => {
+				if (editorContainer && monaco) {
+					console.log('Recreating Monaco editor...');
+
+					monacoEditor = monaco.editor.create(editorContainer, {
+						value: currentContent,
+						language: currentLanguage,
+						theme: 'vs-dark',
+						fontSize: 14,
+						fontFamily: 'JetBrains Mono, Consolas, Monaco, monospace',
+						wordWrap: 'on',
+						automaticLayout: true,
+						minimap: { enabled: false },
+						scrollBeyondLastLine: false,
+						renderLineHighlight: 'line',
+						lineNumbers: 'on',
+						folding: true,
+						bracketMatching: 'always',
+						autoIndent: 'full',
+						tabSize: 2,
+						insertSpaces: true
+					});
+
+					// Re-add event listeners
+					monacoEditor.onDidChangeModelContent(() => {
+						unsavedChanges = true;
+
+						if (autoSaveTimeout) {
+							clearTimeout(autoSaveTimeout);
+						}
+
+						autoSaveTimeout = setTimeout(() => {
+							if (currentFilePath && unsavedChanges) {
+								handleSaveFile();
+							}
+						}, 2000);
+					});
+
+					monacoEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+						handleSaveFile();
+					});
+
+					console.log('Editor recreated successfully');
+				}
+			}, 100);
+		} else {
+			// Normal layout trigger for other mode changes
+			setTimeout(() => {
+				if (monacoEditor) {
+					monacoEditor.layout();
+				}
+			}, 100);
+		}
 	}
 
-	// Resize functions
+	// Performance-optimized resize functions with GPU acceleration
+	let rafId: number | null = null;
+	let pendingResizeEvent: MouseEvent | null = null;
+
 	function startResize(panel: 'filetree' | 'editor-pdf' | 'git-split', event: MouseEvent) {
 		isResizing = true;
 		resizingPanel = panel;
 		event.preventDefault();
 
-		document.addEventListener('mousemove', handleResize);
+		// Add performance optimization classes and prevent iframe event capture
+		if (panel === 'editor-pdf') {
+			const mainArea = document.querySelector('.main-content-area') as HTMLElement;
+			if (mainArea) {
+				mainArea.style.willChange = 'transform';
+			}
+
+			// Prevent PDF iframe from capturing mouse events during resize
+			const pdfIframes = document.querySelectorAll('iframe');
+			pdfIframes.forEach(iframe => {
+				iframe.style.pointerEvents = 'none';
+			});
+
+			// Add transparent overlay to ensure mouse events are captured
+			const overlay = document.createElement('div');
+			overlay.id = 'resize-overlay';
+			overlay.style.cssText = `
+				position: fixed;
+				top: 0;
+				left: 0;
+				width: 100vw;
+				height: 100vh;
+				background: transparent;
+				z-index: 9999;
+				cursor: col-resize;
+				pointer-events: auto;
+			`;
+			document.body.appendChild(overlay);
+
+			// Add body class for consistent cursor styling
+			document.body.classList.add('resizing-editor-pdf');
+		}
+
+		document.addEventListener('mousemove', handleResizeThrottled);
 		document.addEventListener('mouseup', stopResize);
+	}
+
+	function handleResizeThrottled(event: MouseEvent) {
+		if (!isResizing || !resizingPanel) return;
+
+		pendingResizeEvent = event;
+
+		// Use immediate update for first event, then throttle subsequent ones
+		if (rafId === null) {
+			rafId = requestAnimationFrame(() => {
+				if (pendingResizeEvent) {
+					handleResize(pendingResizeEvent);
+					pendingResizeEvent = null;
+				}
+				rafId = null;
+			});
+		}
 	}
 
 	function handleResize(event: MouseEvent) {
@@ -320,16 +505,16 @@
 			const mainArea = document.querySelector('.main-content-area') as HTMLElement;
 			if (mainArea) {
 				const rect = mainArea.getBoundingClientRect();
-				const relativeX = newX - rect.left;
-				const percentage = (relativeX / rect.width) * 100;
-				editorWidth = Math.min(Math.max(percentage, 20), 80); // 20% to 80% range
+				
+				// Ensure we have valid dimensions
+				if (rect.width <= 0) return;
+				
+				const relativeX = newX - rect.left; // Allow negative values for leftward dragging
+				const percentage = (relativeX / rect.width) * 100; // Allow negative percentages
+				const newWidth = Math.min(Math.max(percentage, 20), 80); // 20% to 80% range
 
-				// Trigger Monaco editor resize
-				setTimeout(() => {
-					if (monacoEditor) {
-						monacoEditor.layout();
-					}
-				}, 10);
+				// Always update to allow smooth bidirectional resizing
+				editorWidth = newWidth;
 			}
 		} else if (resizingPanel === 'git-split') {
 			// Calculate percentage based on the sidebar height
@@ -338,15 +523,57 @@
 				const rect = sidebar.getBoundingClientRect();
 				const relativeY = newY - rect.top;
 				const percentage = ((rect.height - relativeY) / rect.height) * 100;
-				gitPanelHeight = Math.min(Math.max(percentage, 20), 70); // 20% to 70% range
+				const newHeight = Math.min(Math.max(percentage, 20), 70); // 20% to 70% range
+
+				// Always update for smooth bidirectional resizing
+				gitPanelHeight = newHeight;
 			}
 		}
 	}
 
 	function stopResize() {
+		const wasEditorPdfResize = resizingPanel === 'editor-pdf';
 		isResizing = false;
 		resizingPanel = null;
-		document.removeEventListener('mousemove', handleResize);
+
+		// Clean up RAF and performance optimizations
+		if (rafId !== null) {
+			cancelAnimationFrame(rafId);
+			rafId = null;
+		}
+		pendingResizeEvent = null;
+
+		// Remove performance optimization classes and restore iframe events
+		const mainArea = document.querySelector('.main-content-area') as HTMLElement;
+		if (mainArea) {
+			mainArea.style.willChange = 'auto';
+		}
+
+		// Restore PDF iframe pointer events
+		const pdfIframes = document.querySelectorAll('iframe');
+		pdfIframes.forEach(iframe => {
+			iframe.style.pointerEvents = 'auto';
+		});
+
+		// Remove transparent overlay
+		const overlay = document.getElementById('resize-overlay');
+		if (overlay) {
+			overlay.remove();
+		}
+
+		// Remove body class
+		document.body.classList.remove('resizing-editor-pdf');
+
+		// Debounce Monaco editor layout call for better performance
+		if (monacoEditor && wasEditorPdfResize) {
+			setTimeout(() => {
+				if (monacoEditor) {
+					monacoEditor.layout();
+				}
+			}, 100); // Increased debounce for better performance
+		}
+
+		document.removeEventListener('mousemove', handleResizeThrottled);
 		document.removeEventListener('mouseup', stopResize);
 	}
 </script>
@@ -468,7 +695,6 @@
 					Compile PDF
 				{/if}
 			</button>
-
 		</div>
 	</header>
 
@@ -480,13 +706,13 @@
 			style="width: {fileTreeWidth}px;"
 		>
 			<!-- File Tree (Top Half) -->
-			<div 
+			<div
 				class="overflow-y-auto border-b border-gray-700"
 				style="height: {100 - gitPanelHeight}%;"
 			>
 				<FileTree repoName={currentRepoName} onFileSelect={handleFileSelect} />
 			</div>
-			
+
 			<!-- Git Panel Resize Handle -->
 			<div
 				role="separator"
@@ -495,12 +721,9 @@
 				class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors"
 				on:mousedown={(e) => startResize('git-split', e)}
 			></div>
-			
+
 			<!-- Git Panel (Bottom Half) -->
-			<div 
-				class="overflow-y-auto"
-				style="height: {gitPanelHeight}%;"
-			>
+			<div class="overflow-y-auto" style="height: {gitPanelHeight}%;">
 				<div class="p-4">
 					<div class="flex items-center justify-between mb-4">
 						<h3 class="text-lg font-medium text-white">Git Operations</h3>
@@ -536,6 +759,18 @@
 					{#if pushSuccess}
 						<div class="bg-green-500/10 border border-green-500/20 rounded p-3 mb-4">
 							<p class="text-green-300 text-sm">Changes pushed successfully!</p>
+						</div>
+					{/if}
+
+					{#if fetchSuccess}
+						<div class="bg-yellow-500/10 border border-yellow-500/20 rounded p-3 mb-4">
+							<p class="text-yellow-300 text-sm">Changes fetched successfully!</p>
+						</div>
+					{/if}
+
+					{#if pullSuccess}
+						<div class="bg-purple-500/10 border border-purple-500/20 rounded p-3 mb-4">
+							<p class="text-purple-300 text-sm">Changes pulled successfully!</p>
 						</div>
 					{/if}
 
@@ -605,6 +840,38 @@
 						</div>
 					{/if}
 
+					<!-- Fetch and Pull buttons -->
+					<div class="flex space-x-2 mb-4">
+						<button
+							on:click={handleFetch}
+							disabled={isFetching || !currentRepoName}
+							class="flex-1 bg-yellow-600 hover:bg-yellow-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
+						>
+							{#if isFetching}
+								<div class="flex items-center justify-center space-x-2">
+									<div class="loading-spinner w-4 h-4"></div>
+									<span>Fetching...</span>
+								</div>
+							{:else}
+								Fetch
+							{/if}
+						</button>
+						<button
+							on:click={handlePull}
+							disabled={isPulling || !currentRepoName}
+							class="flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
+						>
+							{#if isPulling}
+								<div class="flex items-center justify-center space-x-2">
+									<div class="loading-spinner w-4 h-4"></div>
+									<span>Pulling...</span>
+								</div>
+							{:else}
+								Pull
+							{/if}
+						</button>
+					</div>
+
 					{#if gitStatus && !gitStatus.clean}
 						<div class="mb-4">
 							<label for="commit-message" class="block text-sm font-medium text-gray-300 mb-2">
@@ -653,7 +920,7 @@
 					</button>
 				</div>
 			</div>
-			
+
 			<!-- Sidebar Resize Handle -->
 			<div
 				role="separator"
@@ -665,12 +932,14 @@
 		</aside>
 
 		<!-- Main Content Area (Editor + PDF) -->
-		<div class="flex-1 flex main-content-area">
+		<div class="flex-1 flex main-content-area" style="contain: layout style;">
 			<!-- Editor -->
 			{#if layoutMode === 'editor' || layoutMode === 'both'}
 				<div
 					class="flex flex-col {layoutMode === 'both' ? '' : 'flex-1'}"
-					style={layoutMode === 'both' ? `width: ${editorWidth}%` : ''}
+					style={layoutMode === 'both'
+						? `width: ${editorWidth}%; transform: translateZ(0); will-change: width;`
+						: 'transform: translateZ(0);'}
 				>
 					{#if currentFilePath}
 						<div
@@ -711,6 +980,7 @@
 					tabindex="0"
 					aria-label="Resize editor and PDF panels"
 					class="w-1 bg-gray-600 hover:bg-blue-500 cursor-col-resize transition-colors relative"
+					style="transform: translateZ(0); will-change: background-color;"
 					on:mousedown={(e) => startResize('editor-pdf', e)}
 				></div>
 			{/if}
@@ -719,7 +989,9 @@
 			{#if layoutMode === 'pdf' || layoutMode === 'both'}
 				<div
 					class="flex-1 border-l border-gray-700"
-					style={layoutMode === 'both' ? `width: ${100 - editorWidth}%` : ''}
+					style={layoutMode === 'both'
+						? `width: ${100 - editorWidth}%; transform: translateZ(0); will-change: width;`
+						: 'transform: translateZ(0);'}
 				>
 					<PdfPreview {pdfUrl} isLoading={isCompiling} error={compileError} />
 				</div>
