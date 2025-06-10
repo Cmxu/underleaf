@@ -82,7 +82,8 @@
 			monaco = await monacoLoader.default.init();
 
 			// Register LaTeX language if not already registered
-			if (!monaco.languages.getLanguages().find((lang: any) => lang.id === 'latex')) { // eslint-disable-line @typescript-eslint/no-explicit-any
+			if (!monaco.languages.getLanguages().find((lang: any) => lang.id === 'latex')) {
+				 
 				monaco.languages.register({ id: 'latex' });
 
 				// Basic LaTeX syntax highlighting
@@ -445,7 +446,7 @@
 
 			// Prevent PDF iframe from capturing mouse events during resize
 			const pdfIframes = document.querySelectorAll('iframe');
-			pdfIframes.forEach(iframe => {
+			pdfIframes.forEach((iframe) => {
 				iframe.style.pointerEvents = 'none';
 			});
 
@@ -505,10 +506,10 @@
 			const mainArea = document.querySelector('.main-content-area') as HTMLElement;
 			if (mainArea) {
 				const rect = mainArea.getBoundingClientRect();
-				
+
 				// Ensure we have valid dimensions
 				if (rect.width <= 0) return;
-				
+
 				const relativeX = newX - rect.left; // Allow negative values for leftward dragging
 				const percentage = (relativeX / rect.width) * 100; // Allow negative percentages
 				const newWidth = Math.min(Math.max(percentage, 20), 80); // 20% to 80% range
@@ -551,7 +552,7 @@
 
 		// Restore PDF iframe pointer events
 		const pdfIframes = document.querySelectorAll('iframe');
-		pdfIframes.forEach(iframe => {
+		pdfIframes.forEach((iframe) => {
 			iframe.style.pointerEvents = 'auto';
 		});
 

@@ -5,6 +5,10 @@ import type {
 	FileTreeResponse,
 	FileContentResponse,
 	SaveFileResponse,
+	CreateFileResponse,
+	CreateFolderResponse,
+	DeleteFileResponse,
+	RenameFileResponse,
 	GitCommitResponse,
 	GitPushResponse,
 	GitStatusResponse,
@@ -12,7 +16,7 @@ import type {
 	GitPullResponse
 } from '$types/api';
 
-const API_URL = browser ? import.meta.env.VITE_API_URL || '' : 'http://localhost:3001';
+const API_URL = browser ? import.meta.env.VITE_API_URL || 'http://localhost:3001' : 'http://localhost:3001';
 
 class ApiClient {
 	private baseUrl: string;
@@ -60,6 +64,15 @@ class ApiClient {
 
 	async getFileTree(repoName: string, userId = 'anonymous'): Promise<FileTreeResponse> {
 		return this.request<FileTreeResponse>(`/api/files/${userId}/${repoName}`);
+	}
+
+	async checkRepoExists(repoName: string, userId = 'anonymous'): Promise<boolean> {
+		try {
+			await this.getFileTree(repoName, userId);
+			return true;
+		} catch (error) {
+			return false;
+		}
 	}
 
 	async getFileContent(
@@ -139,6 +152,52 @@ class ApiClient {
 		return this.request<GitPullResponse>(`/api/git/${userId}/${repoName}/pull`, {
 			method: 'POST',
 			body: JSON.stringify(body)
+		});
+	}
+
+	async createFile(
+		repoName: string,
+		filePath: string,
+		content = '',
+		userId = 'anonymous'
+	): Promise<CreateFileResponse> {
+		return this.request<CreateFileResponse>(`/api/files/${userId}/${repoName}/create-file`, {
+			method: 'POST',
+			body: JSON.stringify({ filePath, content })
+		});
+	}
+
+	async createFolder(
+		repoName: string,
+		folderPath: string,
+		userId = 'anonymous'
+	): Promise<CreateFolderResponse> {
+		return this.request<CreateFolderResponse>(`/api/files/${userId}/${repoName}/create-folder`, {
+			method: 'POST',
+			body: JSON.stringify({ folderPath })
+		});
+	}
+
+	async deleteFile(
+		repoName: string,
+		filePath: string,
+		userId = 'anonymous'
+	): Promise<DeleteFileResponse> {
+		return this.request<DeleteFileResponse>(`/api/files/${userId}/${repoName}/delete`, {
+			method: 'DELETE',
+			body: JSON.stringify({ filePath })
+		});
+	}
+
+	async renameFile(
+		repoName: string,
+		oldPath: string,
+		newPath: string,
+		userId = 'anonymous'
+	): Promise<RenameFileResponse> {
+		return this.request<RenameFileResponse>(`/api/files/${userId}/${repoName}/rename`, {
+			method: 'PUT',
+			body: JSON.stringify({ oldPath, newPath })
 		});
 	}
 }

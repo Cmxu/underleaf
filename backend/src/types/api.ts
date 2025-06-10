@@ -108,6 +108,40 @@ export interface GitPullResponse {
   summary?: any;
 }
 
+export interface CreateFileRequest {
+  filePath: string;
+  content?: string;
+}
+
+export interface CreateFileResponse {
+  message: string;
+}
+
+export interface CreateFolderRequest {
+  folderPath: string;
+}
+
+export interface CreateFolderResponse {
+  message: string;
+}
+
+export interface DeleteFileRequest {
+  filePath: string;
+}
+
+export interface DeleteFileResponse {
+  message: string;
+}
+
+export interface RenameFileRequest {
+  oldPath: string;
+  newPath: string;
+}
+
+export interface RenameFileResponse {
+  message: string;
+}
+
 export interface ApiErrorResponse {
   error: string;
 } 

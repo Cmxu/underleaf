@@ -8,7 +8,11 @@ import type {
   CloneRepoRequest, 
   CompileRepoRequest, 
   GitCommitRequest, 
-  GitPushRequest
+  GitPushRequest,
+  CreateFileRequest,
+  CreateFolderRequest,
+  DeleteFileRequest,
+  RenameFileRequest
 } from './types/api';
 
 const execAsync = promisify(exec);
@@ -186,6 +190,145 @@ app.put('/api/files/:userId/:repoName/content', async (req, res) => {
   } catch (err) {
     console.error('File save error:', err);
     return res.status(500).json({ error: 'Failed to save file' });
+  }
+});
+
+// Create new file
+app.post('/api/files/:userId/:repoName/create-file', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    const { filePath, content = '' } = req.body as CreateFileRequest;
+    
+    if (!filePath) {
+      return res.status(400).json({ error: 'filePath is required' });
+    }
+    
+    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
+    const fullFilePath = path.join(repoPath, filePath);
+    
+    // Security check: ensure the file is within the repository
+    if (!fullFilePath.startsWith(repoPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Check if file already exists
+    if (await fs.pathExists(fullFilePath)) {
+      return res.status(409).json({ error: 'File already exists' });
+    }
+    
+    await fs.ensureDir(path.dirname(fullFilePath));
+    await fs.writeFile(fullFilePath, content, 'utf-8');
+    
+    return res.json({ message: 'File created successfully' });
+  } catch (err) {
+    console.error('File create error:', err);
+    return res.status(500).json({ error: 'Failed to create file' });
+  }
+});
+
+// Create new folder
+app.post('/api/files/:userId/:repoName/create-folder', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    const { folderPath } = req.body as CreateFolderRequest;
+    
+    if (!folderPath) {
+      return res.status(400).json({ error: 'folderPath is required' });
+    }
+    
+    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
+    const fullFolderPath = path.join(repoPath, folderPath);
+    
+    // Security check: ensure the folder is within the repository
+    if (!fullFolderPath.startsWith(repoPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Check if folder already exists
+    if (await fs.pathExists(fullFolderPath)) {
+      return res.status(409).json({ error: 'Folder already exists' });
+    }
+    
+    await fs.ensureDir(fullFolderPath);
+    
+    return res.json({ message: 'Folder created successfully' });
+  } catch (err) {
+    console.error('Folder create error:', err);
+    return res.status(500).json({ error: 'Failed to create folder' });
+  }
+});
+
+// Delete file or folder
+app.delete('/api/files/:userId/:repoName/delete', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    const { filePath } = req.body as DeleteFileRequest;
+    
+    if (!filePath) {
+      return res.status(400).json({ error: 'filePath is required' });
+    }
+    
+    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
+    const fullPath = path.join(repoPath, filePath);
+    
+    // Security check: ensure the path is within the repository
+    if (!fullPath.startsWith(repoPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Check if path exists
+    if (!(await fs.pathExists(fullPath))) {
+      return res.status(404).json({ error: 'File or folder not found' });
+    }
+    
+    await fs.remove(fullPath);
+    
+    return res.json({ message: 'File or folder deleted successfully' });
+  } catch (err) {
+    console.error('Delete error:', err);
+    return res.status(500).json({ error: 'Failed to delete file or folder' });
+  }
+});
+
+// Rename/move file or folder
+app.put('/api/files/:userId/:repoName/rename', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    const { oldPath, newPath } = req.body as RenameFileRequest;
+    
+    if (!oldPath || !newPath) {
+      return res.status(400).json({ error: 'oldPath and newPath are required' });
+    }
+    
+    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
+    const fullOldPath = path.join(repoPath, oldPath);
+    const fullNewPath = path.join(repoPath, newPath);
+    
+    // Security check: ensure both paths are within the repository
+    if (!fullOldPath.startsWith(repoPath) || !fullNewPath.startsWith(repoPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // Check if old path exists
+    if (!(await fs.pathExists(fullOldPath))) {
+      return res.status(404).json({ error: 'File or folder not found' });
+    }
+    
+    // Check if new path already exists
+    if (await fs.pathExists(fullNewPath)) {
+      return res.status(409).json({ error: 'Destination already exists' });
+    }
+    
+    // Ensure the parent directory of the new path exists
+    await fs.ensureDir(path.dirname(fullNewPath));
+    
+    // Move the file or folder
+    await fs.move(fullOldPath, fullNewPath);
+    
+    return res.json({ message: 'File or folder renamed successfully' });
+  } catch (err) {
+    console.error('Rename error:', err);
+    return res.status(500).json({ error: 'Failed to rename file or folder' });
   }
 });
 

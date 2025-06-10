@@ -26,6 +26,7 @@
  * ```
  */
 declare module '$env/static/private' {
+	export const VITE_API_URL: string;
 	export const TERM_PROGRAM: string;
 	export const NODE: string;
 	export const INIT_CWD: string;
@@ -105,7 +106,8 @@ declare module '$env/static/private' {
  * ```
  */
 declare module '$env/static/public' {
-	
+	export const PUBLIC_APP_NAME: string;
+	export const PUBLIC_APP_DESCRIPTION: string;
 }
 
 /**
@@ -124,6 +126,7 @@ declare module '$env/static/public' {
  */
 declare module '$env/dynamic/private' {
 	export const env: {
+		VITE_API_URL: string;
 		TERM_PROGRAM: string;
 		NODE: string;
 		INIT_CWD: string;
@@ -210,6 +213,8 @@ declare module '$env/dynamic/private' {
  */
 declare module '$env/dynamic/public' {
 	export const env: {
+		PUBLIC_APP_NAME: string;
+		PUBLIC_APP_DESCRIPTION: string;
 		[key: `PUBLIC_${string}`]: string | undefined;
 	}
 }
