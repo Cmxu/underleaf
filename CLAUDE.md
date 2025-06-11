@@ -127,6 +127,13 @@ The application uses shared TypeScript interfaces between frontend/backend:
 - Environment variables prefixed with `VITE_` are exposed to client
 - Use `PUBLIC_` prefix for SvelteKit public environment variables
 
+### Claude AI Integration
+
+- Set `ANTHROPIC_API_KEY` environment variable to enable Claude AI features
+- Get your API key from [Anthropic Console](https://console.anthropic.com/)
+- Claude Code CLI (v1.0.18) is installed in LaTeX containers for AI assistance
+- AI panel allows natural language interaction with your LaTeX projects
+
 ## Environment Requirements
 
 - Node.js 18+ (for ES2022 features and SvelteKit)

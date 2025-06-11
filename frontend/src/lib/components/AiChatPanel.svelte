@@ -3,44 +3,25 @@
 
 	export let isVisible = false;
 	export let height = 300; // Default height in pixels
+	export let messages: Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }> = [];
+	export let isLoading = false;
 
 	const dispatch = createEventDispatcher<{
 		heightChange: number;
+		sendMessage: string;
+		clearMessages: void;
 	}>();
 
-	let messages: Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }> = [];
 	let currentMessage = '';
-	let isLoading = false;
 
 	function handleSendMessage() {
 		if (!currentMessage.trim() || isLoading) return;
 
-		// Add user message
-		messages = [
-			...messages,
-			{
-				role: 'user',
-				content: currentMessage.trim(),
-				timestamp: new Date()
-			}
-		];
-
 		const userMessage = currentMessage.trim();
 		currentMessage = '';
-		isLoading = true;
-
-		// Simulate AI response (replace with actual API call)
-		setTimeout(() => {
-			messages = [
-				...messages,
-				{
-					role: 'assistant',
-					content: `I understand you said: "${userMessage}". This is a placeholder AI response. In a real implementation, this would connect to an AI service.`,
-					timestamp: new Date()
-				}
-			];
-			isLoading = false;
-		}, 1000);
+		
+		// Dispatch the message to parent component
+		dispatch('sendMessage', userMessage);
 	}
 
 	function handleKeyDown(event: KeyboardEvent) {
@@ -55,7 +36,7 @@
 	}
 
 	function clearChat() {
-		messages = [];
+		dispatch('clearMessages');
 	}
 
 	// Handle height changes
@@ -81,15 +62,17 @@
 			</div>
 			
 			<div class="flex items-center space-x-2">
-				{#if messages.length > 0}
-					<button
-						on:click={clearChat}
-						class="text-gray-400 hover:text-white transition-colors text-xs"
-						title="Clear chat"
-					>
-						Clear
-					</button>
-				{/if}
+				<button
+					on:click={clearChat}
+					disabled={messages.length === 0}
+					class="text-gray-400 hover:text-white transition-colors text-xs px-2 py-1 rounded hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+					title="Clear chat history"
+					aria-label="Clear chat history"
+				>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+					</svg>
+				</button>
 			</div>
 		</div>
 
@@ -151,6 +134,7 @@
 					disabled={!currentMessage.trim() || isLoading}
 					class="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded transition-colors self-end"
 					title="Send message (Enter)"
+					aria-label="Send message"
 				>
 					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />

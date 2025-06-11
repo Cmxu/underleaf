@@ -1,6 +1,10 @@
 export interface CloneRepoRequest {
   repoUrl: string;
   userId?: string;
+  credentials?: {
+    username: string;
+    password: string;
+  };
 }
 
 export interface CloneRepoResponse {
@@ -142,6 +146,44 @@ export interface RenameFileResponse {
   message: string;
 }
 
+export interface ClaudeAiRequest {
+  repoName: string;
+  userId?: string;
+  message: string;
+}
+
+export interface ClaudeAiResponse {
+  message: string;
+  response: string;
+}
+
 export interface ApiErrorResponse {
   error: string;
+}
+
+// Container management types
+export interface UserContainerInfo {
+  userId: string;
+  repoName: string;
+  containerId: string;
+  containerName: string;
+  volumeName: string;
+  status: 'running' | 'stopped' | 'error';
+  createdAt: Date;
+  lastUsed: Date;
+}
+
+export interface RepoVolumeInfo {
+  repoName: string;
+  volumeName: string;
+  userContainers: string[];
+  createdAt: Date;
+  lastUsed: Date;
+}
+
+export interface ContainerStatsResponse {
+  containers: UserContainerInfo[];
+  volumes: RepoVolumeInfo[];
+  totalContainers: number;
+  totalVolumes: number;
 } 

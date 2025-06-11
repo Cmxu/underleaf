@@ -108,6 +108,8 @@ declare module '$env/static/private' {
 declare module '$env/static/public' {
 	export const PUBLIC_APP_NAME: string;
 	export const PUBLIC_APP_DESCRIPTION: string;
+	export const PUBLIC_SUPABASE_URL: string;
+	export const PUBLIC_SUPABASE_ANON_KEY: string;
 }
 
 /**
@@ -215,6 +217,8 @@ declare module '$env/dynamic/public' {
 	export const env: {
 		PUBLIC_APP_NAME: string;
 		PUBLIC_APP_DESCRIPTION: string;
+		PUBLIC_SUPABASE_URL: string;
+		PUBLIC_SUPABASE_ANON_KEY: string;
 		[key: `PUBLIC_${string}`]: string | undefined;
 	}
 }

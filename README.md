@@ -46,6 +46,8 @@ Underleaf aims to be a comprehensive LaTeX editing platform that combines the po
   - [x] Create Git URL input form with validation
   - [x] Implement server-side Git cloning functionality
   - [x] Add project import progress indicators
+  - [x] Add Supabase authentication system
+  - [x] Restrict repository access to authenticated users
   - [ ] Handle common Git authentication methods
 
 - [x] **Core Editor Interface**
@@ -128,28 +130,27 @@ Underleaf aims to be a comprehensive LaTeX editing platform that combines the po
 - **TypeScript** - Type-safe JavaScript
 - **Tailwind CSS** - Utility-first CSS framework
 - **Monaco Editor** - VS Code editor for the web
-- **Svelte Query** - Data fetching and caching
-- **Framer Motion** - Animation library
-- **Svelte Forms** - Form handling
-- **Radix UI** - Accessible component primitives
+- **Supabase** - Authentication and user management
 
 ### Backend Technologies
 - **Node.js** - JavaScript runtime
 - **Express.js** - Web application framework
 - **TypeScript** - Type-safe JavaScript
-- **Prisma** - Database ORM and toolkit
-- **PostgreSQL** - Relational database
-- **Socket.io** - Real-time communication
 - **simple-git** - Git operations
-- **Multer** - File upload handling
+- **Dockerode** - Docker container management
 
-### DevOps & Tools
-- **Docker** - Containerization
+### Infrastructure & DevOps
+- **Docker** - Containerization for user isolation
 - **Docker Compose** - Multi-container orchestration
-- **Nginx** - Reverse proxy and load balancer
-- **GitHub Actions** - CI/CD pipeline
+- **Traefik** - Reverse proxy and load balancer
+- **TeXLive** - LaTeX distribution in containers
 - **ESLint & Prettier** - Code linting and formatting
-- **Jest & Testing Library** - Testing frameworks
+
+### Multi-Tenant Architecture
+- **User Containers** - Each user gets isolated LaTeX environment
+- **Container Management** - Automatic lifecycle and cleanup
+- **Traffic Routing** - Single port entry with Traefik
+- **Resource Isolation** - Secure separation between users
 
 ## 📁 Project Structure
 
@@ -177,8 +178,12 @@ underleaf/
 │   └── package.json
 ├── shared/                  # Shared types and utilities
 ├── docker/                  # Docker configurations
+│   ├── latex/              # LaTeX container definition
+│   └── traefik/            # Traefik configuration
 ├── docs/                    # Documentation
 └── scripts/                 # Build and deployment scripts
+    ├── setup-containers.sh  # Multi-container setup
+    └── monitor-containers.sh # Container monitoring
 ```
 
 ## 🚀 Getting Started
@@ -190,18 +195,35 @@ underleaf/
 - PostgreSQL (or use Docker)
 
 ### Development Setup
+
+#### Quick Start with Docker (Recommended)
 ```bash
 # Clone the repository
 git clone <repository-url>
 cd underleaf
 
-# Install dependencies (when package.json files are created)
+# Set up Supabase authentication
+# Follow the detailed guide in SUPABASE_SETUP.md
+# Create frontend/.env with your Supabase credentials:
+# PUBLIC_SUPABASE_URL=your_supabase_project_url
+# PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+
+# Start the multi-container infrastructure
+./scripts/setup-containers.sh
+
+# Access the application at http://localhost
+```
+
+#### Traditional Development Setup
+```bash
+# Clone the repository
+git clone <repository-url>
+cd underleaf
+
+# Install dependencies
 npm install
 
-# Set up environment variables
-cp .env.example .env
-# Directory where cloned repositories will be stored
-# (can be customized via REPO_BASE_PATH)
+# Set up Supabase authentication (see SUPABASE_SETUP.md)
 
 # Start development servers
 npm run dev
@@ -218,6 +240,9 @@ npm run dev
 - [x] Basic editor interface with Monaco Editor integration
 - [x] LaTeX compilation pipeline with Docker
 - [x] Split-screen layout with file tree and PDF preview placeholders
+- [x] Multi-tenant container architecture with Traefik
+- [x] User-isolated LaTeX environments
+- [x] Automatic container lifecycle management
 
 **Currently Working On:**
 - [ ] Enhanced file tree with actual file browsing
@@ -229,6 +254,12 @@ npm run dev
 - Real-time collaboration features
 - Advanced editor features and shortcuts
 - User authentication and project management
+
+## 📚 Documentation
+
+- **[Supabase Setup Guide](SUPABASE_SETUP.md)** - Authentication configuration
+- **[Container Architecture](CONTAINER_ARCHITECTURE.md)** - Multi-tenant container system
+- **[API Documentation](docs/API.md)** - Backend API reference (coming soon)
 
 ## 🤝 Contributing
 

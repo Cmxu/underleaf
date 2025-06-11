@@ -2,15 +2,30 @@
 	import { goto } from '$app/navigation';
 	import { apiClient } from '$lib/utils/api';
 	import { recentUrls } from '$lib/stores/recentUrls';
+	import { authStore, authService } from '$lib/stores/auth';
+	import AuthModal from '$lib/components/AuthModal.svelte';
+	import CredentialsModal from '$lib/components/CredentialsModal.svelte';
 
 	let repoUrl = '';
 	let isLoading = false;
 	let error: string | null = null;
 	let success: string | null = null;
 	let showDropdown = false;
+	let showAuthModal = false;
+	let showCredentialsModal = false;
 
 	async function handleSubmit() {
+		await doSubmit();
+	}
+
+	async function doSubmit(credentials?: { username: string; password: string }) {
 		if (!repoUrl.trim()) return;
+
+		// Check if user is authenticated
+		if (!$authStore.user) {
+			showAuthModal = true;
+			return;
+		}
 
 		isLoading = true;
 		error = null;
@@ -21,7 +36,34 @@
 			const repoName = repoUrl.split('/').pop()?.replace('.git', '') || 'repository';
 
 			// Check if repository already exists locally
-			const repoExists = await apiClient.checkRepoExists(repoName);
+			const userId = $authStore.user.id;
+			console.log('Checking if repo exists for user:', userId, 'repo:', repoName);
+			const repoExists = await apiClient.checkRepoExists(repoName, userId);
+			console.log('checkRepoExists result:', repoExists);
+
+			// If it's a new repository that requires authentication and we don't have credentials, prompt for them
+			const requiresAuth = repoUrl.includes('overleaf.com') || 
+								  repoUrl.includes('git.overleaf.com') ||
+								  (repoUrl.includes('github.com') && !repoUrl.includes('/public/')) ||
+								  repoUrl.includes('gitlab.com') ||
+								  repoUrl.includes('bitbucket.org');
+								  
+			console.log('=== CREDENTIAL DETECTION DEBUG ===');
+			console.log('Repository URL:', repoUrl);
+			console.log('Repository exists:', repoExists);
+			console.log('Requires auth:', requiresAuth);
+			console.log('Has credentials:', !!credentials);
+			console.log('Credentials object:', credentials);
+			console.log('Should prompt?', !repoExists && requiresAuth && !credentials);
+			console.log('===================================');
+								  
+			if (!repoExists && requiresAuth && !credentials) {
+				console.log('🔐 NEW REPOSITORY REQUIRING AUTHENTICATION - SHOWING CREDENTIALS MODAL');
+				success = 'This repository requires authentication. Please provide your Git credentials.';
+				showCredentialsModal = true;
+				isLoading = false;
+				return;
+			}
 
 			if (repoExists) {
 				// Repository exists, just navigate to it
@@ -40,28 +82,70 @@
 				}, 500);
 			} else {
 				// Repository doesn't exist, clone it
-				const result = await apiClient.cloneRepo(repoUrl);
+				const result = await apiClient.cloneRepo(repoUrl, userId, credentials);
 				console.log('Repository cloned:', result);
 
-				// Add to recent URLs
-				recentUrls.addUrl(repoUrl);
-
-				// Store current repository in localStorage for the editor
-				localStorage.setItem('currentRepo', repoName);
-
-				// Show success message briefly before navigating
-				success = result.message;
+				// Ensure the container is ready and repository is accessible
+				success = 'Repository cloned, preparing environment...';
 				
-				// Navigate to editor after a short delay to show the success message
-				setTimeout(async () => {
-					await goto(`/editor?repo=${encodeURIComponent(repoName)}`);
-				}, 1000);
+				try {
+					// Wait for the container to be ready and verify repository access
+					console.log('Ensuring container is ready for repository:', repoName);
+					await apiClient.ensureUserContainer(repoName, userId);
+					
+					console.log('Container ready, verifying repository access...');
+					// Try to get file tree to verify repository is ready
+					await apiClient.getFileTree(repoName, userId);
+					
+					console.log('Repository is ready and accessible');
+					
+					// Add to recent URLs
+					recentUrls.addUrl(repoUrl);
+
+					// Store current repository in localStorage for the editor
+					localStorage.setItem('currentRepo', repoName);
+
+					// Show success message briefly before navigating
+					success = 'Repository ready! Opening editor...';
+					
+					// Navigate to editor after a short delay to show the success message
+					setTimeout(async () => {
+						await goto(`/editor?repo=${encodeURIComponent(repoName)}`);
+					}, 500);
+				} catch (containerError) {
+					console.error('Failed to prepare repository environment:', containerError);
+					const errorMsg = containerError instanceof Error ? containerError.message : 'Unknown error';
+					console.error('Detailed error:', errorMsg);
+					error = `Repository cloned but failed to prepare environment: ${errorMsg}. Please try again.`;
+				}
 			}
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to access repository';
+			const errorMessage = err instanceof Error ? err.message : 'Failed to access repository';
+			
+			// Check if this is an authentication error
+			if (errorMessage.includes('could not read Username') || 
+				errorMessage.includes('Authentication failed') ||
+				errorMessage.includes('fatal: could not read Password') ||
+				errorMessage.includes('No such device or address') ||
+				errorMessage.includes('repository not found') ||
+				errorMessage.includes('Overleaf repository')) {
+				// Show credentials modal for authentication
+				showCredentialsModal = true;
+			} else {
+				error = errorMessage;
+			}
 		} finally {
 			isLoading = false;
 		}
+	}
+
+	function handleCredentialsSubmit(event: CustomEvent<{ username: string; password: string }>) {
+		showCredentialsModal = false;
+		doSubmit(event.detail);
+	}
+
+	function handleCredentialsCancel() {
+		showCredentialsModal = false;
 	}
 
 	function handleKeydown(event: KeyboardEvent) {
@@ -79,6 +163,14 @@
 		event.stopPropagation();
 		recentUrls.removeUrl(url);
 	}
+
+	function openAuthModal() {
+		showAuthModal = true;
+	}
+
+	async function handleSignOut() {
+		await authService.signOut();
+	}
 </script>
 
 <svelte:head>
@@ -89,8 +181,40 @@
 	/>
 </svelte:head>
 
-<div class="min-h-screen flex items-center justify-center p-8 bg-dark-800">
-	<div class="w-full max-w-2xl">
+<div class="min-h-screen bg-dark-800">
+	<!-- Header with auth -->
+	<header class="p-6">
+		<div class="max-w-6xl mx-auto flex justify-between items-center">
+			<div class="text-2xl font-bold text-white">Underleaf</div>
+			
+			<div class="flex items-center space-x-4">
+				{#if $authStore.loading}
+					<div class="loading-spinner"></div>
+				{:else if $authStore.user}
+					<div class="flex items-center space-x-3">
+						<span class="text-gray-300">Welcome, {$authStore.user.email}</span>
+						<button
+							on:click={handleSignOut}
+							class="text-gray-400 hover:text-white transition-colors"
+						>
+							Sign Out
+						</button>
+					</div>
+				{:else}
+					<button
+						on:click={openAuthModal}
+						class="btn-primary px-6 py-2 rounded-xl"
+					>
+						Sign In
+					</button>
+				{/if}
+			</div>
+		</div>
+	</header>
+
+	<!-- Main content -->
+	<div class="flex items-center justify-center p-8 pt-0">
+		<div class="w-full max-w-2xl">
 		<div class="text-center mb-12">
 			<h1 class="text-6xl md:text-7xl font-bold text-white mb-6 text-shadow">Underleaf</h1>
 			<p class="text-xl text-gray-300 max-w-lg mx-auto leading-relaxed">
@@ -103,6 +227,7 @@
 			<div class="relative">
 				<div
 					class="relative flex items-center bg-white/95 backdrop-blur-glass rounded-3xl p-1 shadow-2xl hover:shadow-3xl transition-all duration-300 hover:-translate-y-1 focus-within:bg-white focus-within:shadow-3xl focus-within:-translate-y-1 border border-white/10 focus-within:border-white/20"
+					class:opacity-50={!$authStore.user && !$authStore.loading}
 				>
 					<input
 						bind:value={repoUrl}
@@ -110,8 +235,8 @@
 						on:focus={() => (showDropdown = $recentUrls.length > 0)}
 						on:blur={() => setTimeout(() => (showDropdown = false), 150)}
 						type="url"
-						placeholder="Enter Git repository URL (e.g., https://github.com/user/repo)"
-						disabled={isLoading}
+						placeholder={$authStore.user ? "Enter Git repository URL (e.g., https://github.com/user/repo)" : "Sign in to access repositories"}
+						disabled={isLoading || (!$authStore.user && !$authStore.loading)}
 						class="flex-1 px-8 py-6 text-lg font-medium bg-transparent text-gray-800 placeholder-gray-500 outline-none rounded-3xl disabled:opacity-70 disabled:cursor-not-allowed"
 					/>
 					{#if $recentUrls.length > 0}
@@ -120,6 +245,7 @@
 							on:click={() => (showDropdown = !showDropdown)}
 							class="mr-2 p-2 text-gray-600 hover:text-gray-800 transition-colors"
 							title="Recent repositories"
+							aria-label="Show recent repositories"
 						>
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path
@@ -133,7 +259,7 @@
 					{/if}
 					<button
 						type="submit"
-						disabled={isLoading || !repoUrl.trim()}
+						disabled={isLoading || !repoUrl.trim() || (!$authStore.user && !$authStore.loading)}
 						class="btn-primary h-16 w-16 rounded-2xl flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
 					>
 						{#if isLoading}
@@ -172,6 +298,7 @@
 									on:click={(e) => removeRecentUrl(e, url)}
 									class="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-all"
 									title="Remove from recent"
+									aria-label="Remove from recent repositories"
 								>
 									<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 										<path
@@ -205,10 +332,34 @@
 			{/if}
 
 			<div class="text-center">
-				<p class="text-gray-400 text-sm leading-relaxed">
-					Clone a LaTeX project from GitHub and start collaborating instantly
-				</p>
+				{#if !$authStore.user && !$authStore.loading}
+					<p class="text-gray-400 text-sm leading-relaxed mb-4">
+						<strong>Sign in required:</strong> You need to authenticate to access Git repositories
+					</p>
+					<button
+						on:click={openAuthModal}
+						class="btn-primary px-8 py-3 rounded-xl font-medium"
+					>
+						Sign In to Continue
+					</button>
+				{:else}
+					<p class="text-gray-400 text-sm leading-relaxed">
+						Clone a LaTeX project from GitHub and start collaborating instantly
+					</p>
+				{/if}
 			</div>
 		</form>
+		</div>
 	</div>
 </div>
+
+<!-- Auth Modal -->
+<AuthModal bind:isOpen={showAuthModal} />
+
+<!-- Credentials Modal -->
+<CredentialsModal 
+	bind:isOpen={showCredentialsModal}
+	{repoUrl}
+	on:submit={handleCredentialsSubmit}
+	on:cancel={handleCredentialsCancel}
+/>

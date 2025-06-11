@@ -5,6 +5,7 @@
 	import FileTreeNode from './FileTreeNode.svelte';
 
 	export let repoName: string | null = null;
+	export let userId: string = 'anonymous';
 	export let onFileSelect: (filePath: string) => void = () => {};
 
 	let fileTree: FileTreeItem[] = [];
@@ -42,19 +43,42 @@
 		loadFileTree();
 	}
 
-	async function loadFileTree() {
+	async function loadFileTree(retryCount = 0) {
 		if (!repoName) return;
 
 		loading = true;
 		error = null;
 
 		try {
-			const response = await apiClient.getFileTree(repoName);
+			const response = await apiClient.getFileTree(repoName, userId);
 			fileTree = response.tree;
+			console.log('File tree loaded successfully:', fileTree.length, 'items');
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to load file tree';
+			const errorMessage = err instanceof Error ? err.message : 'Failed to load file tree';
+			console.error('File tree loading error:', errorMessage);
+			
+			// Check if this is a repository not ready error and we haven't retried too many times
+			if ((errorMessage.includes('Repository is still being prepared') || 
+				 errorMessage.includes('Repository not found') || 
+				 errorMessage.includes('not found')) && retryCount < 3) {
+				console.log(`Repository not ready, retrying in ${2 + retryCount} seconds... (attempt ${retryCount + 1}/3)`);
+				error = `Repository is being prepared... (attempt ${retryCount + 1}/3)`;
+				
+				// Retry with exponential backoff
+				setTimeout(() => {
+					loadFileTree(retryCount + 1);
+				}, (2 + retryCount) * 1000);
+			} else if (errorMessage.includes('Repository is still being prepared') || 
+					   errorMessage.includes('Repository not found') || 
+					   errorMessage.includes('not found')) {
+				error = 'Repository not ready. The cloning process may still be in progress. Please try refreshing the page.';
+			} else {
+				error = errorMessage;
+			}
 		} finally {
-			loading = false;
+			if (retryCount === 0 || retryCount >= 3) {
+				loading = false;
+			}
 		}
 	}
 
@@ -115,7 +139,7 @@
 				filePath = `${contextMenuPath}/${filePath}`;
 			}
 
-			await apiClient.createFile(repoName, filePath);
+			await apiClient.createFile(repoName, filePath, '', userId);
 			await loadFileTree();
 			showCreateFileDialog = false;
 			newFileName = '';
@@ -137,7 +161,7 @@
 				folderPath = `${contextMenuPath}/${folderPath}`;
 			}
 
-			await apiClient.createFolder(repoName, folderPath);
+			await apiClient.createFolder(repoName, folderPath, userId);
 			await loadFileTree();
 			showCreateFolderDialog = false;
 			newFolderName = '';
@@ -157,7 +181,7 @@
 			pathParts[pathParts.length - 1] = renameNewName.trim();
 			const newPath = pathParts.join('/');
 
-			await apiClient.renameFile(repoName, renameOldPath, newPath);
+			await apiClient.renameFile(repoName, renameOldPath, newPath, userId);
 			await loadFileTree();
 			showRenameDialog = false;
 			renameOldPath = '';
@@ -175,7 +199,7 @@
 
 		operationInProgress = true;
 		try {
-			await apiClient.deleteFile(repoName, path);
+			await apiClient.deleteFile(repoName, path, userId);
 			await loadFileTree();
 			hideContextMenu();
 		} catch (err) {
@@ -259,7 +283,7 @@
 				return;
 			}
 
-			await apiClient.renameFile(repoName, draggedItem, newPath);
+			await apiClient.renameFile(repoName, draggedItem, newPath, userId);
 			await loadFileTree();
 
 			// Update selected file path if it was the moved file
@@ -392,7 +416,7 @@
 				<p class="text-red-400 text-sm mb-2">⚠️ Error loading files</p>
 				<p class="text-gray-400 text-xs">{error}</p>
 				<button
-					on:click={loadFileTree}
+					on:click={() => loadFileTree()}
 					class="mt-2 text-blue-400 hover:text-blue-300 text-sm underline"
 				>
 					Retry

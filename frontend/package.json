@@ -14,7 +14,9 @@
 		"type-check": "svelte-check --tsconfig ./tsconfig.json"
 	},
 	"dependencies": {
-		"@monaco-editor/loader": "^1.4.0"
+		"@monaco-editor/loader": "^1.4.0",
+		"@supabase/ssr": "^0.6.1",
+		"@supabase/supabase-js": "^2.50.0"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^3.0.0",

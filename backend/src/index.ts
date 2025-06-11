@@ -1,9 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs-extra';
-import simpleGit from 'simple-git';
-import { exec } from 'child_process';
-import { promisify } from 'util';
+// import simpleGit from 'simple-git'; // Now using containerized Git operations
 import type { 
   CloneRepoRequest, 
   CompileRepoRequest, 
@@ -12,15 +10,15 @@ import type {
   CreateFileRequest,
   CreateFolderRequest,
   DeleteFileRequest,
-  RenameFileRequest
+  RenameFileRequest,
+  ClaudeAiRequest,
+  ContainerStatsResponse
 } from './types/api';
-
-const execAsync = promisify(exec);
+import { containerService } from './services/containerService';
 
 const app = express();
 const port = process.env.PORT || 3001;
-// Base directory for cloned repositories. Each user will have a
-// separate subdirectory once authentication is implemented.
+// Legacy: Keep for old file-based endpoints (deprecated)
 const REPO_BASE_PATH = process.env.REPO_BASE_PATH || path.join(__dirname, '..', '..', 'repos');
 
 app.use(express.json());
@@ -43,32 +41,270 @@ app.get('/', (_req, res) => {
 
 app.post('/api/clone', async (req, res) => {
   try {
-    const { repoUrl, userId = 'anonymous' } = req.body as CloneRepoRequest;
+    const { repoUrl, userId = 'anonymous', credentials } = req.body as CloneRepoRequest;
     
     if (!repoUrl) {
       return res.status(400).json({ error: 'repoUrl is required' });
     }
 
-    // Store repositories under a user-specific directory so that a real
-    // authentication system can isolate projects in the future.
-    const userPath = path.join(REPO_BASE_PATH, userId);
-    const repoName = path.basename(repoUrl, '.git');
-    const repoPath = path.join(userPath, repoName);
-
-    await fs.ensureDir(userPath);
-    if (await fs.pathExists(repoPath)) {
-      const repoGit = simpleGit(repoPath);
-      await repoGit.pull();
-      return res.json({ message: 'Repository updated', path: repoPath });
-    } else {
-      const git = simpleGit();
-      await git.clone(repoUrl, repoPath);
+    // Validate and normalize the repository URL
+    let normalizedRepoUrl = repoUrl.trim();
+    
+    // Handle common URL format issues
+    if (normalizedRepoUrl.includes('git@') && !normalizedRepoUrl.includes('://')) {
+      // SSH URL format: git@host/path or git@host:path
+      const sshPattern = /^git@([^/:]+)[/:](.*?)(?:\.git)?$/;
+      const match = normalizedRepoUrl.match(sshPattern);
       
-    return res.json({ message: 'Repository cloned', path: repoPath });
+      if (match) {
+        const [, host, path] = match;
+        
+        // For Overleaf and similar services that need authentication, convert to HTTPS
+        if (host.includes('overleaf.com') || host.includes('github.com') || host.includes('gitlab.com') || host.includes('bitbucket.org')) {
+          normalizedRepoUrl = `https://${host}/${path}.git`;
+        } else {
+          // For other hosts, keep SSH format but fix the syntax
+          normalizedRepoUrl = `git@${host}:${path}.git`;
+        }
+      } else if (!normalizedRepoUrl.endsWith('.git')) {
+        normalizedRepoUrl += '.git';
+      }
+    } else if (normalizedRepoUrl.includes('git@') && normalizedRepoUrl.includes('://')) {
+      // Handle malformed URLs like "https://git@host/path"
+      const malformedPattern = /^https:\/\/git@([^/:]+)[/:](.*?)(?:\.git)?$/;
+      const match = normalizedRepoUrl.match(malformedPattern);
+      
+      if (match) {
+        const [, host, path] = match;
+        normalizedRepoUrl = `https://${host}/${path}.git`;
+      }
     }
+    
+    const repoName = path.basename(normalizedRepoUrl, '.git');
+    console.log(`Cloning repository ${normalizedRepoUrl} for user ${userId} into container volume`);
+
+    try {
+      // Check if repository volume already exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      
+      if (volumeInfo) {
+        // Repository already exists, try to update it
+        console.log(`Repository ${repoName} already exists, pulling latest changes`);
+        try {
+          // Setup credentials if provided
+          if (credentials && credentials.username && normalizedRepoUrl.startsWith('https://')) {
+            // For Overleaf, use "git" as username and token as password
+            // For other services, use username + password/token
+            let gitUsername, gitPassword;
+            if (normalizedRepoUrl.includes('overleaf.com')) {
+              // Overleaf requires username "git" and token as password
+              gitUsername = 'git';
+              gitPassword = credentials.username; // Frontend sends token as username for Overleaf
+            } else {
+              // GitHub/GitLab use username + token
+              gitUsername = credentials.username;
+              gitPassword = credentials.password || '';
+            }
+            
+            // Create a credential helper script in the container
+            const credHelperScript = `#!/bin/bash
+case "$1" in
+  get)
+    echo "username=${gitUsername}"
+    echo "password=${gitPassword}"
+    ;;
+esac`;
+            
+            // Create the credential helper script
+            await containerService.executeInUserContainer(
+              userId, 
+              repoName, 
+              ['sh', '-c', `cat > /tmp/git-creds.sh << 'EOF'\n${credHelperScript}\nEOF`]
+            );
+            
+            // Make it executable
+            await containerService.executeInUserContainer(userId, repoName, [
+              'chmod', '+x', '/tmp/git-creds.sh'
+            ]);
+            
+            // Configure Git globally to use our credential helper
+            await containerService.executeInUserContainer(userId, repoName, [
+              'git', 'config', '--global', 'credential.helper', '/tmp/git-creds.sh'
+            ]);
+            
+            // Also configure Git globally to prevent interactive prompts
+            await containerService.executeInUserContainer(userId, repoName, [
+              'git', 'config', '--global', 'core.askpass', ''
+            ]);
+            
+            await containerService.executeInUserContainer(userId, repoName, [
+              'git', 'config', '--global', 'credential.modalprompt', 'false'
+            ]);
+          }
+          
+          const pullCommand = ['git', 'pull'];
+          await containerService.executeInUserContainer(userId, repoName, pullCommand);
+          return res.json({ 
+            message: 'Repository updated', 
+            repoName, 
+            path: `/workdir` 
+          });
+        } catch (pullError) {
+          console.warn('Git pull failed, repository may have local changes:', pullError);
+          return res.json({ 
+            message: 'Repository already exists (pull failed - may have local changes)', 
+            repoName, 
+            path: `/workdir` 
+          });
+        }
+      } else {
+        // Clone repository into a new volume via container
+        console.log(`Cloning new repository ${repoName} into volume`);
+        
+        // First, get or create the user container (this also creates the volume)
+        await containerService.getOrCreateUserContainer(userId, repoName);
+        
+        // Setup Git credentials using custom credential helper for secure authentication
+        let cloneCommand: string[];
+        
+        if (credentials && credentials.username && normalizedRepoUrl.startsWith('https://')) {
+          console.log('Setting up Git authentication with credentials');
+          
+          // For Overleaf, use "git" as username and token as password
+          // For other services, use username + password/token
+          let gitUsername, gitPassword;
+          if (normalizedRepoUrl.includes('overleaf.com')) {
+            // Overleaf requires username "git" and token as password
+            gitUsername = 'git';
+            gitPassword = credentials.username; // Frontend sends token as username for Overleaf
+          } else {
+            // GitHub/GitLab use username + token
+            gitUsername = credentials.username;
+            gitPassword = credentials.password || '';
+          }
+          
+          // Create a credential helper script in the container
+          const credHelperScript = `#!/bin/bash
+case "$1" in
+  get)
+    echo "username=${gitUsername}"
+    echo "password=${gitPassword}"
+    ;;
+esac`;
+          
+          try {
+            // Create the credential helper script
+            await containerService.executeInUserContainer(
+              userId, 
+              repoName, 
+              ['sh', '-c', `cat > /tmp/git-creds.sh << 'EOF'\n${credHelperScript}\nEOF`]
+            );
+            
+            // Make it executable
+            await containerService.executeInUserContainer(userId, repoName, [
+              'chmod', '+x', '/tmp/git-creds.sh'
+            ]);
+            
+            // Configure Git globally to use our credential helper (since no .git repo exists yet)
+            await containerService.executeInUserContainer(userId, repoName, [
+              'git', 'config', '--global', 'credential.helper', '/tmp/git-creds.sh'
+            ]);
+            
+            // Also configure Git globally to prevent interactive prompts
+            await containerService.executeInUserContainer(userId, repoName, [
+              'git', 'config', '--global', 'core.askpass', ''
+            ]);
+            
+            await containerService.executeInUserContainer(userId, repoName, [
+              'git', 'config', '--global', 'credential.modalprompt', 'false'
+            ]);
+            
+            console.log('Global Git credential helper configured');
+          } catch (credError) {
+            console.error('Failed to setup Git credentials:', credError);
+            throw new Error('Failed to setup Git authentication');
+          }
+        }
+        
+        // Build git clone command with environment variables to prevent prompts
+        cloneCommand = ['git', 'clone', normalizedRepoUrl, '.'];
+        console.log(`Executing git clone command: ${cloneCommand.join(' ')}`);
+        
+        // Clone the repository inside the container
+        try {
+          const cloneResult = await containerService.executeInUserContainer(userId, repoName, cloneCommand);
+          console.log('Git clone completed successfully');
+          console.log('Clone stdout:', cloneResult.stdout);
+          if (cloneResult.stderr) {
+            console.log('Clone stderr:', cloneResult.stderr);
+          }
+        } catch (cloneError) {
+          console.error('Git clone failed:', cloneError);
+          const errorMessage = cloneError instanceof Error ? cloneError.message : 'Unknown error';
+          
+          // Provide more helpful error messages based on the error
+          if (errorMessage.includes('403') && normalizedRepoUrl.includes('overleaf.com')) {
+            throw new Error(`Access denied to Overleaf repository. Please verify: 1) Repository ID is correct, 2) Git token is valid and current, 3) Email matches your Overleaf account.`);
+          } else if (errorMessage.includes('128') && normalizedRepoUrl.includes('overleaf.com')) {
+            throw new Error(`Failed to clone Overleaf repository. Please check your Git token and ensure you have access to this repository.`);
+          } else if (errorMessage.includes('128') && (errorMessage.includes('Authentication') || errorMessage.includes('could not read'))) {
+            throw new Error(`Authentication failed. Please check your credentials and try again.`);
+          } else if (errorMessage.includes('128') && errorMessage.includes('not found')) {
+            throw new Error(`Repository not found. Please check the repository URL.`);
+          } else {
+            throw new Error(`Failed to clone repository: ${errorMessage}`);
+          }
+        }
+        
+        return res.json({ 
+          message: 'Repository cloned', 
+          repoName, 
+          path: `/workdir` 
+        });
+      }
+    } catch (containerError) {
+      console.error('Container operation failed:', containerError);
+      return res.status(500).json({ error: 'Failed to clone repository in container' });
+    }
+    
   } catch (err) {
     console.error('Clone error:', err);
     return res.status(500).json({ error: 'Failed to clone repository' });
+  }
+});
+
+// Ensure user container is running for a repository
+app.post('/api/containers/:userId/:repoName/ensure', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+    
+    console.log(`Ensuring container is running for user ${userId} with repo ${repoName}`);
+    
+    try {
+      // This will create or start the user's container
+      const containerInfo = await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      return res.json({ 
+        message: 'Container is ready',
+        containerName: containerInfo.containerName,
+        status: containerInfo.status,
+        volumeName: containerInfo.volumeName
+      });
+      
+    } catch (containerError) {
+      console.error('Container ensure error:', containerError);
+      return res.status(500).json({ error: 'Failed to ensure container is running' });
+    }
+    
+  } catch (err) {
+    console.error('Container ensure error:', err);
+    return res.status(500).json({ error: 'Failed to ensure container is running' });
   }
 });
 
@@ -76,54 +312,60 @@ app.post('/api/clone', async (req, res) => {
 app.get('/api/files/:userId/:repoName', async (req, res) => {
   try {
     const { userId, repoName } = req.params;
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
     
-    if (!(await fs.pathExists(repoPath))) {
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    const buildFileTree = async (dirPath: string, relativePath = ''): Promise<any> => {
-      const entries = await fs.readdir(dirPath, { withFileTypes: true });
-      const tree: any[] = [];
+    console.log(`Getting file tree for ${repoName} via container for user ${userId}`);
+    
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
       
-      for (const entry of entries) {
-        // Skip hidden files and common ignore patterns
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') {
-          continue;
-        }
+      // First, check if the repository directory exists and has content
+      try {
+        const { stdout: testOutput } = await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['sh', '-c', 'if [ -d "/workdir" ] && [ "$(ls -A /workdir 2>/dev/null)" ]; then echo "ready"; else echo "empty"; fi']
+        );
         
-        const fullPath = path.join(dirPath, entry.name);
-        const itemRelativePath = path.join(relativePath, entry.name);
-        
-        if (entry.isDirectory()) {
-          const children = await buildFileTree(fullPath, itemRelativePath);
-          tree.push({
-            name: entry.name,
-            type: 'directory',
-            path: itemRelativePath,
-            children: children
-          });
-        } else {
-          tree.push({
-            name: entry.name,
-            type: 'file',
-            path: itemRelativePath,
-            size: (await fs.stat(fullPath)).size
-          });
+        if (testOutput.trim() === 'empty') {
+          console.log(`Repository ${repoName} container exists but directory is empty - may still be cloning`);
+          return res.status(404).json({ error: 'Repository is still being prepared. Please wait a moment and try again.' });
         }
+      } catch (testError) {
+        console.error('Failed to test repository readiness:', testError);
+        return res.status(500).json({ error: 'Failed to check repository status' });
       }
       
-      return tree.sort((a, b) => {
-        // Directories first, then files, both alphabetically
-        if (a.type !== b.type) {
-          return a.type === 'directory' ? -1 : 1;
-        }
-        return a.name.localeCompare(b.name);
-      });
-    };
+      // Get file tree using container command
+      const { stdout } = await containerService.executeInUserContainer(
+        userId, 
+        repoName, 
+        ['find', '.', '-type', 'f', '-o', '-type', 'd', '!', '-path', './.*', '!', '-path', './node_modules*']
+      );
+      
+      const paths = stdout.trim().split('\n').filter(p => p.trim() !== '' && p !== '.');
+      
+      if (paths.length === 0) {
+        console.log(`Repository ${repoName} found but appears to be empty`);
+        return res.json({ tree: [] });
+      }
+      
+      const fileTree = buildFileTreeFromPaths(paths);
+      console.log(`File tree loaded for ${repoName}: ${paths.length} items found`);
+      
+      return res.json({ tree: fileTree });
+      
+    } catch (containerError) {
+      console.error('Container file tree error:', containerError);
+      return res.status(500).json({ error: 'Failed to get file tree from container' });
+    }
     
-    const fileTree = await buildFileTree(repoPath);
-    return res.json({ tree: fileTree });
   } catch (err) {
     console.error('File tree error:', err);
     return res.status(500).json({ error: 'Failed to get file tree' });
@@ -140,25 +382,40 @@ app.get('/api/files/:userId/:repoName/content', async (req, res) => {
       return res.status(400).json({ error: 'filePath query parameter is required' });
     }
     
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    const fullFilePath = path.join(repoPath, filePath);
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
     
-    // Security check: ensure the file is within the repository
-    if (!fullFilePath.startsWith(repoPath)) {
+    // Security check: ensure the file path is safe
+    if (filePath.includes('..') || filePath.startsWith('/')) {
       return res.status(403).json({ error: 'Access denied' });
     }
     
-    if (!(await fs.pathExists(fullFilePath))) {
-      return res.status(404).json({ error: 'File not found' });
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      // Read file content via container
+      const { stdout } = await containerService.executeInUserContainer(
+        userId, 
+        repoName, 
+        ['cat', filePath]
+      );
+      
+      return res.json({ content: stdout });
+      
+    } catch (containerError) {
+      // Check if it's a "file not found" error
+      if (containerError instanceof Error && containerError.message.includes('No such file')) {
+        return res.status(404).json({ error: 'File not found' });
+      }
+      
+      console.error('Container file read error:', containerError);
+      return res.status(500).json({ error: 'Failed to read file from container' });
     }
     
-    const stats = await fs.stat(fullFilePath);
-    if (stats.isDirectory()) {
-      return res.status(400).json({ error: 'Path is a directory' });
-    }
-    
-    const content = await fs.readFile(fullFilePath, 'utf-8');
-    return res.json({ content });
   } catch (err) {
     console.error('File content error:', err);
     return res.status(500).json({ error: 'Failed to read file' });
@@ -175,18 +432,46 @@ app.put('/api/files/:userId/:repoName/content', async (req, res) => {
       return res.status(400).json({ error: 'filePath and content are required' });
     }
     
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    const fullFilePath = path.join(repoPath, filePath);
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
     
-    // Security check: ensure the file is within the repository
-    if (!fullFilePath.startsWith(repoPath)) {
+    // Security check: ensure the file path is safe
+    if (filePath.includes('..') || filePath.startsWith('/')) {
       return res.status(403).json({ error: 'Access denied' });
     }
     
-    await fs.ensureDir(path.dirname(fullFilePath));
-    await fs.writeFile(fullFilePath, content, 'utf-8');
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      // Create directory if needed and save file via container
+      const dir = path.dirname(filePath);
+      if (dir !== '.' && dir !== '') {
+        await containerService.executeInUserContainer(
+          userId, 
+          repoName, 
+          ['mkdir', '-p', dir]
+        );
+      }
+      
+      // Write file content via container using echo
+      const escapedContent = content.replace(/'/g, "'\"'\"'");
+      await containerService.executeInUserContainer(
+        userId, 
+        repoName, 
+        ['sh', '-c', `echo '${escapedContent}' > "${filePath}"`]
+      );
+      
+      return res.json({ message: 'File saved successfully' });
+      
+    } catch (containerError) {
+      console.error('Container file save error:', containerError);
+      return res.status(500).json({ error: 'Failed to save file in container' });
+    }
     
-    return res.json({ message: 'File saved successfully' });
   } catch (err) {
     console.error('File save error:', err);
     return res.status(500).json({ error: 'Failed to save file' });
@@ -358,34 +643,73 @@ app.get('/api/files/:userId/:repoName/pdf/:filename', async (req, res) => {
   }
 });
 
-async function checkDockerAvailable(): Promise<boolean> {
-  try {
-    await execAsync('docker --version');
-    return true;
-  } catch {
-    return false;
+function buildFileTreeFromPaths(paths: string[]): any {
+  const tree: any[] = [];
+  const pathMap = new Map();
+  
+  // Sort paths to ensure parent directories come before children
+  paths.sort();
+  
+  for (const fullPath of paths) {
+    if (fullPath === '.' || fullPath === '') continue;
+    
+    const relativePath = fullPath.startsWith('./') ? fullPath.slice(2) : fullPath;
+    const parts = relativePath.split('/');
+    const name = parts[parts.length - 1];
+    
+    // Determine if it's a directory (ends with no extension or has children)
+    const isDirectory = !name.includes('.') || paths.some(p => p.startsWith(fullPath + '/'));
+    
+    const item = {
+      name,
+      type: isDirectory ? 'directory' : 'file',
+      path: relativePath,
+      ...(isDirectory && { children: [] })
+    };
+    
+    if (parts.length === 1) {
+      // Root level item
+      tree.push(item);
+      pathMap.set(relativePath, item);
+    } else {
+      // Find parent and add as child
+      const parentPath = parts.slice(0, -1).join('/');
+      const parent = pathMap.get(parentPath);
+      if (parent && parent.children) {
+        parent.children.push(item);
+      }
+      pathMap.set(relativePath, item);
+    }
   }
+  
+  // Sort each level: directories first, then files, both alphabetically
+  const sortLevel = (items: any[]) => {
+    items.sort((a, b) => {
+      if (a.type !== b.type) {
+        return a.type === 'directory' ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
+    
+    items.forEach(item => {
+      if (item.children) {
+        sortLevel(item.children);
+      }
+    });
+  };
+  
+  sortLevel(tree);
+  return tree;
 }
 
-async function checkPdflatexAvailable(): Promise<boolean> {
-  try {
-    await execAsync('pdflatex --version');
-    return true;
-  } catch {
-    return false;
-  }
-}
+// Commented out unused function - replaced by container service
+// async function compileWithDocker(repoPath: string, texFile: string): Promise<void> {
+//   const dockerCommand = `docker run --rm -v ${repoPath}:/workdir latex pdflatex -interaction=nonstopmode ${texFile}`;
+//   await execAsync(dockerCommand);
+// }
 
-async function compileWithDocker(repoPath: string, texFile: string): Promise<void> {
-  const dockerCommand = `docker run --rm -v ${repoPath}:/workdir latex pdflatex -interaction=nonstopmode ${texFile}`;
-  await execAsync(dockerCommand);
-}
-
-async function compileWithPdflatex(repoPath: string, texFile: string): Promise<void> {
-  const command = `cd "${repoPath}" && pdflatex -interaction=nonstopmode "${texFile}"`;
-  await execAsync(command);
-}
-
+// Removed createSamplePdf function - now handled inline in container
+/* 
 async function createSamplePdf(repoPath: string, texFile: string): Promise<void> {
   // Create a sample PDF using a simple LaTeX document for demo purposes
   const sampleLatex = `\\documentclass{article}
@@ -470,6 +794,7 @@ And inline math like $\\pi \\approx 3.14159$.
     await fs.writeFile(pdfPath, minimalPdf);
   }
 }
+*/
 
 app.post('/api/compile', async (req, res) => {
   try {
@@ -479,78 +804,114 @@ app.post('/api/compile', async (req, res) => {
       return res.status(400).json({ error: 'repoName is required' });
     }
 
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    
-    // Check if the repository path exists
-    if (!(await fs.pathExists(repoPath))) {
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    console.log(`Compiling ${texFile} in ${repoPath}`);
+    console.log(`Compiling ${texFile} in container for user ${userId} with repo ${repoName}`);
     
-    // Check if the tex file exists
-    let actualTexFile = texFile;
-    const texPath = path.join(repoPath, texFile);
-    if (!(await fs.pathExists(texPath))) {
-      console.log(`TeX file ${texFile} not found, looking for common alternatives...`);
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
       
-      // Look for common LaTeX main files
-      const commonFiles = ['paper.tex', 'main.tex', 'document.tex', 'article.tex'];
-      let foundFile = null;
-      
-      for (const file of commonFiles) {
-        if (await fs.pathExists(path.join(repoPath, file))) {
-          foundFile = file;
-          break;
+      // Check if the tex file exists via container
+      let actualTexFile = texFile;
+      try {
+        await containerService.executeInUserContainer(userId, repoName, ['test', '-f', texFile]);
+      } catch {
+        console.log(`TeX file ${texFile} not found, looking for common alternatives...`);
+        
+        // Look for common LaTeX main files via container
+        const commonFiles = ['paper.tex', 'main.tex', 'document.tex', 'article.tex'];
+        let foundFile = null;
+        
+        for (const file of commonFiles) {
+          try {
+            await containerService.executeInUserContainer(userId, repoName, ['test', '-f', file]);
+            foundFile = file;
+            break;
+          } catch {
+            // File doesn't exist, continue
+          }
+        }
+        
+        if (foundFile) {
+          console.log(`Found ${foundFile}, using it instead`);
+          actualTexFile = foundFile;
+        } else {
+          // Create a simple LaTeX file for demo via container
+          console.log(`No LaTeX files found, creating demo file`);
+          const sampleLatex = `\\documentclass{article}
+\\usepackage[utf8]{inputenc}
+\\title{Underleaf Demo}
+\\author{Compiled Successfully}
+\\date{\\today}
+\\begin{document}
+\\maketitle
+\\section{Welcome to Underleaf}
+This is a demonstration PDF showing that compilation is working.
+
+\\textbf{Note:} LaTeX compilation is working! You can now edit and compile real LaTeX documents.
+\\end{document}`;
+          
+          const escapedContent = sampleLatex.replace(/'/g, "'\"'\"'");
+          await containerService.executeInUserContainer(
+            userId, 
+            repoName, 
+            ['sh', '-c', `echo '${escapedContent}' > "${texFile}"`]
+          );
+          
+          // Compile the demo file
+          await containerService.executeInUserContainer(
+            userId, 
+            repoName, 
+            ['pdflatex', '-interaction=nonstopmode', '-output-directory=.', texFile]
+          );
+          
+          const pdfFile = texFile.replace('.tex', '.pdf');
+          return res.json({ 
+            message: 'Demo PDF created (no LaTeX files found in repository)',
+            pdfFile: pdfFile,
+            pdfUrl: `/api/files/${userId}/${repoName}/pdf/${pdfFile}`
+          });
         }
       }
       
-      if (foundFile) {
-        console.log(`Found ${foundFile}, using it instead`);
-        actualTexFile = foundFile;
-      } else {
-        // Create a simple LaTeX file for demo
-        console.log(`No LaTeX files found, creating demo file`);
-        await createSamplePdf(repoPath, texFile);
-        const pdfFile = texFile.replace('.tex', '.pdf');
-        return res.json({ 
-          message: 'Demo PDF created (no LaTeX files found in repository)',
-          pdfFile: pdfFile,
-          pdfUrl: `/api/files/${userId}/${repoName}/pdf/${pdfFile}`
-        });
-      }
-    }
-    
-    try {
-      // Try Docker first if available
-      if (await checkDockerAvailable()) {
-        console.log('Using Docker for LaTeX compilation');
-        await compileWithDocker(repoPath, actualTexFile);
-      }
-      // Fall back to local pdflatex if available
-      else if (await checkPdflatexAvailable()) {
-        console.log('Using local pdflatex for compilation');
-        await compileWithPdflatex(repoPath, actualTexFile);
-      }
-      // Create a demo PDF for development
-      else {
-        console.log('Neither Docker nor pdflatex available, creating demo PDF');
-        await createSamplePdf(repoPath, actualTexFile);
+      // Use containerized LaTeX compilation for each user
+      console.log(`Using user container for LaTeX compilation: ${userId}/${repoName}`);
+      const { stdout, stderr } = await containerService.executeInUserContainer(
+        userId, 
+        repoName, 
+        ['pdflatex', '-interaction=nonstopmode', '-output-directory=.', actualTexFile]
+      );
+      
+      if (stderr && !stdout) {
+        console.warn('LaTeX compilation warnings/errors:', stderr);
       }
       
       const pdfFile = actualTexFile.replace('.tex', '.pdf');
-      const pdfPath = path.join(repoPath, pdfFile);
       
-      // Check if PDF was created
-      if (await fs.pathExists(pdfPath)) {
-        const stats = await fs.stat(pdfPath);
-        console.log(`PDF created successfully: ${pdfFile} (${stats.size} bytes)`);
+      // Check if PDF was created via container
+      try {
+        await containerService.executeInUserContainer(userId, repoName, ['test', '-f', pdfFile]);
+        
+        // Get file size via container
+        const { stdout: sizeOutput } = await containerService.executeInUserContainer(
+          userId, 
+          repoName, 
+          ['stat', '-c', '%s', pdfFile]
+        );
+        const size = parseInt(sizeOutput.trim()) || 0;
+        
+        console.log(`PDF created successfully: ${pdfFile} (${size} bytes)`);
         return res.json({ 
           message: 'Compilation finished successfully',
           pdfFile: pdfFile,
           pdfUrl: `/api/files/${userId}/${repoName}/pdf/${pdfFile}`
         });
-      } else {
+      } catch {
         throw new Error('PDF was not generated');
       }
       
@@ -572,24 +933,82 @@ app.post('/api/compile', async (req, res) => {
 app.get('/api/git/:userId/:repoName/status', async (req, res) => {
   try {
     const { userId, repoName } = req.params;
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
     
-    if (!(await fs.pathExists(repoPath))) {
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    const git = simpleGit(repoPath);
-    const status = await git.status();
+    console.log(`Getting git status for ${repoName} via container for user ${userId}`);
     
-    return res.json({
-      modified: status.modified,
-      added: status.created,
-      deleted: status.deleted,
-      untracked: status.not_added,
-      clean: status.isClean(),
-      currentBranch: status.current || 'master',
-      tracking: status.tracking || undefined
-    });
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      // Get git status via container
+      const { stdout } = await containerService.executeInUserContainer(
+        userId, 
+        repoName, 
+        ['git', 'status', '--porcelain=v1', '--branch']
+      );
+      
+      // Parse git status output
+      const lines = stdout.split('\n').filter(line => line.trim());
+      const modified: string[] = [];
+      const added: string[] = [];
+      const deleted: string[] = [];
+      const untracked: string[] = [];
+      let currentBranch = 'master';
+      let tracking: string | undefined;
+      
+      for (const line of lines) {
+        if (line.startsWith('##')) {
+          // Branch information
+          const branchInfo = line.slice(3);
+          const branchMatch = branchInfo.match(/^([^.]+)/);
+          if (branchMatch) {
+            currentBranch = branchMatch[1];
+          }
+          if (branchInfo.includes('...')) {
+            const trackingMatch = branchInfo.match(/\.\.\.([^[\s]+)/);
+            if (trackingMatch) {
+              tracking = trackingMatch[1];
+            }
+          }
+        } else {
+          const status = line.slice(0, 2);
+          const filePath = line.slice(3);
+          
+          if (status[0] === 'M' || status[1] === 'M') {
+            modified.push(filePath);
+          } else if (status[0] === 'A' || status[1] === 'A') {
+            added.push(filePath);
+          } else if (status[0] === 'D' || status[1] === 'D') {
+            deleted.push(filePath);
+          } else if (status === '??') {
+            untracked.push(filePath);
+          }
+        }
+      }
+      
+      const clean = modified.length === 0 && added.length === 0 && deleted.length === 0 && untracked.length === 0;
+      
+      return res.json({
+        modified,
+        added,
+        deleted,
+        untracked,
+        clean,
+        currentBranch,
+        tracking
+      });
+      
+    } catch (containerError) {
+      console.error('Container git status error:', containerError);
+      return res.status(500).json({ error: 'Failed to get git status from container' });
+    }
+    
   } catch (err) {
     console.error('Git status error:', err);
     return res.status(500).json({ error: 'Failed to get Git status' });
@@ -606,30 +1025,59 @@ app.post('/api/git/:userId/:repoName/commit', async (req, res) => {
       return res.status(400).json({ error: 'Commit message is required' });
     }
     
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    
-    if (!(await fs.pathExists(repoPath))) {
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    const git = simpleGit(repoPath);
+    console.log(`Committing changes for ${repoName} via container for user ${userId}`);
     
-    // Configure user if provided
-    if (author) {
-      await git.addConfig('user.name', author.name);
-      await git.addConfig('user.email', author.email);
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      // Configure git user if provided
+      if (author) {
+        await containerService.executeInUserContainer(userId, repoName, [
+          'git', 'config', 'user.name', author.name
+        ]);
+        await containerService.executeInUserContainer(userId, repoName, [
+          'git', 'config', 'user.email', author.email
+        ]);
+      }
+      
+      // Add all modified and untracked files
+      await containerService.executeInUserContainer(userId, repoName, [
+        'git', 'add', '.'
+      ]);
+      
+      // Commit changes
+      const { stdout } = await containerService.executeInUserContainer(userId, repoName, [
+        'git', 'commit', '-m', message
+      ]);
+      
+      // Extract commit hash from output
+      const commitMatch = stdout.match(/\[([^\]]+)\s+([a-f0-9]+)\]/);
+      const hash = commitMatch ? commitMatch[2] : 'unknown';
+      
+      return res.json({
+        message: 'Changes committed successfully',
+        hash
+      });
+      
+    } catch (containerError) {
+      console.error('Container git commit error:', containerError);
+      const errorMessage = containerError instanceof Error ? containerError.message : 'Unknown error';
+      
+      // Check if it's a "nothing to commit" error
+      if (errorMessage.includes('nothing to commit')) {
+        return res.status(400).json({ error: 'No changes to commit' });
+      }
+      
+      return res.status(500).json({ error: 'Failed to commit changes in container' });
     }
     
-    // Add all modified and untracked files
-    await git.add('.');
-    
-    // Commit changes
-    const result = await git.commit(message);
-    
-    return res.json({
-      message: 'Changes committed successfully',
-      hash: result.commit
-    });
   } catch (err) {
     console.error('Git commit error:', err);
     return res.status(500).json({ error: 'Failed to commit changes' });
@@ -642,27 +1090,42 @@ app.post('/api/git/:userId/:repoName/push', async (req, res) => {
     const { userId, repoName } = req.params;
     const { remote = 'origin', branch } = req.body as GitPushRequest;
     
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    
-    if (!(await fs.pathExists(repoPath))) {
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    const git = simpleGit(repoPath);
+    console.log(`Pushing changes for ${repoName} via container for user ${userId}`);
     
-    // Get current branch if not provided
-    let pushBranch = branch;
-    if (!pushBranch) {
-      const status = await git.status();
-      pushBranch = status.current || 'master';
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      // Get current branch if not provided
+      let pushBranch = branch;
+      if (!pushBranch) {
+        const { stdout } = await containerService.executeInUserContainer(userId, repoName, [
+          'git', 'rev-parse', '--abbrev-ref', 'HEAD'
+        ]);
+        pushBranch = stdout.trim() || 'master';
+      }
+      
+      // Push changes
+      await containerService.executeInUserContainer(userId, repoName, [
+        'git', 'push', remote, pushBranch
+      ]);
+      
+      return res.json({
+        message: 'Changes pushed successfully'
+      });
+      
+    } catch (containerError) {
+      console.error('Container git push error:', containerError);
+      const errorMessage = containerError instanceof Error ? containerError.message : 'Unknown error';
+      return res.status(500).json({ error: `Failed to push changes: ${errorMessage}` });
     }
     
-    // Push changes
-    await git.push(remote, pushBranch);
-    
-    return res.json({
-      message: 'Changes pushed successfully'
-    });
   } catch (err) {
     console.error('Git push error:', err);
     const errorMessage = err instanceof Error ? err.message : 'Failed to push changes';
@@ -676,20 +1139,33 @@ app.post('/api/git/:userId/:repoName/fetch', async (req, res) => {
     const { userId, repoName } = req.params;
     const { remote = 'origin' } = req.body;
     
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    
-    if (!(await fs.pathExists(repoPath))) {
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    const git = simpleGit(repoPath);
+    console.log(`Fetching changes for ${repoName} via container for user ${userId}`);
     
-    // Fetch changes from remote
-    await git.fetch(remote);
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      // Fetch changes from remote
+      await containerService.executeInUserContainer(userId, repoName, [
+        'git', 'fetch', remote
+      ]);
+      
+      return res.json({
+        message: 'Fetched changes successfully'
+      });
+      
+    } catch (containerError) {
+      console.error('Container git fetch error:', containerError);
+      const errorMessage = containerError instanceof Error ? containerError.message : 'Unknown error';
+      return res.status(500).json({ error: `Failed to fetch changes: ${errorMessage}` });
+    }
     
-    return res.json({
-      message: 'Fetched changes successfully'
-    });
   } catch (err) {
     console.error('Git fetch error:', err);
     const errorMessage = err instanceof Error ? err.message : 'Failed to fetch changes';
@@ -703,28 +1179,43 @@ app.post('/api/git/:userId/:repoName/pull', async (req, res) => {
     const { userId, repoName } = req.params;
     const { remote = 'origin', branch } = req.body;
     
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    
-    if (!(await fs.pathExists(repoPath))) {
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    const git = simpleGit(repoPath);
+    console.log(`Pulling changes for ${repoName} via container for user ${userId}`);
     
-    // Get current branch if not provided
-    let pullBranch = branch;
-    if (!pullBranch) {
-      const status = await git.status();
-      pullBranch = status.current || 'master';
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      // Get current branch if not provided
+      let pullBranch = branch;
+      if (!pullBranch) {
+        const { stdout } = await containerService.executeInUserContainer(userId, repoName, [
+          'git', 'rev-parse', '--abbrev-ref', 'HEAD'
+        ]);
+        pullBranch = stdout.trim() || 'master';
+      }
+      
+      // Pull changes from remote
+      const { stdout } = await containerService.executeInUserContainer(userId, repoName, [
+        'git', 'pull', remote, pullBranch
+      ]);
+      
+      return res.json({
+        message: 'Pulled changes successfully',
+        summary: stdout
+      });
+      
+    } catch (containerError) {
+      console.error('Container git pull error:', containerError);
+      const errorMessage = containerError instanceof Error ? containerError.message : 'Unknown error';
+      return res.status(500).json({ error: `Failed to pull changes: ${errorMessage}` });
     }
     
-    // Pull changes from remote
-    const pullResult = await git.pull(remote, pullBranch);
-    
-    return res.json({
-      message: 'Pulled changes successfully',
-      summary: pullResult.summary
-    });
   } catch (err) {
     console.error('Git pull error:', err);
     const errorMessage = err instanceof Error ? err.message : 'Failed to pull changes';
@@ -732,6 +1223,242 @@ app.post('/api/git/:userId/:repoName/pull', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+// Claude AI setup endpoint
+app.get('/api/claude/setup', async (req, res) => {
+  try {
+    const { userId = 'anonymous', repoName } = req.query as { userId?: string; repoName?: string };
+    
+    if (!repoName) {
+      return res.status(400).json({ error: 'repoName is required' });
+    }
+
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+    
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      // Check Claude configuration status
+      const { stdout: configOutput } = await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['claude', 'config', 'list']
+      );
+      
+      const config = JSON.parse(configOutput);
+      
+      return res.json({
+        configured: !!process.env.ANTHROPIC_API_KEY,
+        apiKeySet: !!process.env.ANTHROPIC_API_KEY,
+        config,
+        setupInstructions: {
+          step1: "Get your API key from https://console.anthropic.com/",
+          step2: "Set ANTHROPIC_API_KEY environment variable",
+          step3: "Restart the backend server",
+          alternativeSetup: "Or run 'claude config set -g anthropic.apiKey YOUR_KEY' manually"
+        },
+        authUrl: "https://console.anthropic.com/settings/keys"
+      });
+      
+    } catch (containerError) {
+      console.error('Container claude setup check error:', containerError);
+      return res.status(500).json({ error: 'Failed to check Claude setup in container' });
+    }
+    
+  } catch (err) {
+    console.error('Claude setup endpoint error:', err);
+    return res.status(500).json({ error: 'Failed to check Claude setup' });
+  }
 });
+
+// Claude AI endpoint
+app.post('/api/claude', async (req, res) => {
+  try {
+    const { userId = 'anonymous', repoName, message } = req.body as ClaudeAiRequest;
+    
+    if (!repoName || !message) {
+      return res.status(400).json({ error: 'repoName and message are required' });
+    }
+
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+    
+    console.log(`Executing Claude command in container for ${repoName} with message: "${message}"`);
+    
+    try {
+      // Set up environment variables for Claude CLI if API key is available
+      const claudeEnv = process.env.ANTHROPIC_API_KEY ? 
+        ['ANTHROPIC_API_KEY=' + process.env.ANTHROPIC_API_KEY] : [];
+      
+      // Execute Claude CLI command in the user's container
+      // Using 'claude --print' for non-interactive output
+      const { stdout, stderr } = await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['claude', '--print', '--output-format', 'text', message],
+        undefined, // no stdin
+        claudeEnv  // pass API key environment variable
+      );
+      
+      if (stderr && stderr.includes('error') && !stdout) {
+        throw new Error(stderr);
+      }
+      
+      const response = stdout || stderr || 'No response from Claude';
+      
+      return res.json({
+        message: 'Claude AI response received',
+        response: response.trim()
+      });
+      
+    } catch (claudeError) {
+      console.error('Claude command failed:', claudeError);
+      const errorMessage = claudeError instanceof Error ? claudeError.message : 'Unknown error';
+      
+      // Check if it's an authentication error
+      if (errorMessage.includes('API key') || errorMessage.includes('authentication') || errorMessage.includes('auth')) {
+        return res.status(500).json({ 
+          error: 'Claude API authentication failed. Please set ANTHROPIC_API_KEY environment variable with your Anthropic API key.' 
+        });
+      }
+      
+      // Check if claude command is available in container
+      try {
+        await containerService.executeInUserContainer(
+          userId, 
+          repoName, 
+          ['which', 'claude']
+        );
+      } catch {
+        return res.status(500).json({ 
+          error: 'Claude CLI not found in container. Please rebuild the LaTeX image with Claude CLI installed.' 
+        });
+      }
+      
+      return res.status(500).json({ 
+        error: 'Claude AI request failed', 
+        details: errorMessage
+      });
+    }
+    
+  } catch (err) {
+    console.error('Claude AI endpoint error:', err);
+    return res.status(500).json({ error: 'Failed to process Claude AI request' });
+  }
+  });
+
+  // Container management endpoints
+  app.get('/api/containers/stats', async (_req, res) => {
+    try {
+      const containers = containerService.getAllUserContainers();
+      const volumes = containerService.getAllRepoVolumes();
+      const response: ContainerStatsResponse = {
+        containers,
+        volumes,
+        totalContainers: containers.length,
+        totalVolumes: volumes.length
+      };
+      return res.json(response);
+    } catch (err) {
+      console.error('Container stats error:', err);
+      return res.status(500).json({ error: 'Failed to get container stats' });
+    }
+  });
+
+  app.get('/api/containers/:userId/:repoName', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      const containerInfo = await containerService.getUserContainerInfo(userId, repoName);
+      
+      if (!containerInfo) {
+        return res.status(404).json({ error: 'Container not found' });
+      }
+      
+      return res.json(containerInfo);
+    } catch (err) {
+      console.error('Container info error:', err);
+      return res.status(500).json({ error: 'Failed to get container information' });
+    }
+  });
+
+  app.delete('/api/containers/:userId/:repoName', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      await containerService.removeUserContainer(userId, repoName);
+      return res.json({ message: 'Container removed successfully' });
+    } catch (err) {
+      console.error('Container removal error:', err);
+      return res.status(500).json({ error: 'Failed to remove container' });
+    }
+  });
+
+  app.get('/api/repositories/:repoName/containers', async (req, res) => {
+    try {
+      const { repoName } = req.params;
+      const containers = containerService.getContainersForRepo(repoName);
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      
+      return res.json({
+        repoName,
+        containers,
+        volume: volumeInfo,
+        collaborators: containers.length
+      });
+    } catch (err) {
+      console.error('Repository containers error:', err);
+      return res.status(500).json({ error: 'Failed to get repository information' });
+    }
+  });
+
+  app.get('/api/volumes/:repoName', async (req, res) => {
+    try {
+      const { repoName } = req.params;
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Volume not found' });
+      }
+      
+      return res.json(volumeInfo);
+    } catch (err) {
+      console.error('Volume info error:', err);
+      return res.status(500).json({ error: 'Failed to get volume information' });
+    }
+  });
+
+  // Administrative endpoint for manual volume cleanup (use with extreme caution!)
+  app.delete('/api/volumes/:repoName/force', async (req, res) => {
+    try {
+      const { repoName } = req.params;
+      const { confirm } = req.body;
+      
+      if (confirm !== 'DELETE_ALL_DATA') {
+        return res.status(400).json({ 
+          error: 'Confirmation required', 
+          message: 'Send {"confirm": "DELETE_ALL_DATA"} to confirm permanent deletion' 
+        });
+      }
+      
+      await containerService.forceCleanupRepoVolume(repoName);
+      
+      return res.json({ 
+        message: 'Volume force cleanup completed', 
+        warning: 'All uncommitted changes have been permanently deleted' 
+      });
+    } catch (err) {
+      console.error('Volume force cleanup error:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Failed to cleanup volume';
+      return res.status(500).json({ error: errorMessage });
+    }
+  });
+  
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+  });

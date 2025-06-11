@@ -1,6 +1,10 @@
 export interface CloneRepoRequest {
 	repoUrl: string;
 	userId?: string;
+	credentials?: {
+		username: string;
+		password: string;
+	};
 }
 
 export interface CloneRepoResponse {
@@ -135,4 +139,15 @@ export interface RenameFileResponse {
 
 export interface ApiError {
 	error: string;
+}
+
+export interface ClaudeAiRequest {
+	repoName: string;
+	userId?: string;
+	message: string;
+}
+
+export interface ClaudeAiResponse {
+	message: string;
+	response: string;
 }

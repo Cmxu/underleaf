@@ -3,7 +3,9 @@
 	import { goto } from '$app/navigation';
 	import FileTree from '$components/FileTree.svelte';
 	import PdfPreview from '$components/PdfPreview.svelte';
+	import AiChatPanel from '$components/AiChatPanel.svelte';
 	import { apiClient } from '$lib/utils/api';
+	import { authStore } from '$lib/stores/auth';
 	import type { GitStatusResponse } from '$lib/types/api';
 
 	let editorContainer: HTMLDivElement;
@@ -23,8 +25,14 @@
 	let fileTreeWidth = 256; // 16rem in pixels
 	let editorWidth = 50; // percentage for editor when in 'both' mode
 	let isResizing = false;
-	let resizingPanel: 'filetree' | 'editor-pdf' | 'git-split' | null = null;
+	let resizingPanel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat' | null = null;
 	let gitPanelHeight = 40; // percentage for git panel height within sidebar
+
+	// AI Chat Panel state
+	let showAiChat = false;
+	let aiChatHeight = 300; // Default height in pixels
+	let aiChatMessages: Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }> = [];
+	let aiChatLoading = false;
 
 	// Git state
 	let gitStatus: GitStatusResponse | null = null;
@@ -52,6 +60,11 @@
 		}, 50);
 	}
 
+	// Get current user ID
+	function getCurrentUserId(): string {
+		return $authStore.user?.id || 'anonymous';
+	}
+
 	// Get repo name from URL params or localStorage
 	onMount(async () => {
 		// Try to get repository name from URL params or localStorage
@@ -62,6 +75,26 @@
 			// Redirect to home if no repository is specified
 			goto('/');
 			return;
+		}
+
+		// Ensure the user's container is running for this repository
+		try {
+			const userId = getCurrentUserId();
+			console.log(`Ensuring container is running for user ${userId} with repo ${currentRepoName}`);
+			const containerInfo = await apiClient.ensureUserContainer(currentRepoName, userId);
+			console.log('Container ready:', containerInfo);
+			
+			// Verify repository is accessible by trying to get file tree
+			try {
+				await apiClient.getFileTree(currentRepoName, userId);
+				console.log('Repository verified and accessible');
+			} catch (fileTreeError) {
+				console.error('Repository not accessible, may need to be cloned:', fileTreeError);
+				compileError = 'Repository not found. Please return to home and clone the repository again.';
+			}
+		} catch (error) {
+			console.error('Failed to ensure container is running:', error);
+			compileError = 'Failed to initialize repository environment. Please try again.';
 		}
 
 		await initializeMonaco();
@@ -155,7 +188,8 @@
 		if (!currentRepoName) return;
 
 		try {
-			const response = await apiClient.getFileContent(currentRepoName, filePath);
+			const userId = getCurrentUserId();
+			const response = await apiClient.getFileContent(currentRepoName, filePath, userId);
 
 			if (monacoEditor) {
 				monacoEditor.setValue(response.content);
@@ -189,7 +223,8 @@
 
 		try {
 			const content = monacoEditor.getValue();
-			await apiClient.saveFile(currentRepoName, currentFilePath, content);
+			const userId = getCurrentUserId();
+			await apiClient.saveFile(currentRepoName, currentFilePath, content, userId);
 			unsavedChanges = false;
 
 			if (autoSaveTimeout) {
@@ -215,7 +250,8 @@
 
 		try {
 			const texFile = currentFilePath?.endsWith('.tex') ? currentFilePath : 'main.tex';
-			const result = await apiClient.compileRepo(currentRepoName, 'anonymous', texFile);
+			const userId = getCurrentUserId();
+			const result = await apiClient.compileRepo(currentRepoName, userId, texFile);
 			compileSuccess = true;
 
 			if (result.pdfUrl) {
@@ -242,7 +278,8 @@
 		if (!currentRepoName) return;
 
 		try {
-			gitStatus = await apiClient.getGitStatus(currentRepoName);
+			const userId = getCurrentUserId();
+			gitStatus = await apiClient.getGitStatus(currentRepoName, userId);
 			gitError = null;
 		} catch (err) {
 			gitError = err instanceof Error ? err.message : 'Failed to get Git status';
@@ -257,7 +294,8 @@
 		gitError = null;
 
 		try {
-			await apiClient.commitChanges(currentRepoName, commitMessage.trim());
+			const userId = getCurrentUserId();
+			await apiClient.commitChanges(currentRepoName, commitMessage.trim(), userId);
 			commitSuccess = true;
 			commitMessage = '';
 
@@ -283,7 +321,8 @@
 		gitError = null;
 
 		try {
-			await apiClient.pushChanges(currentRepoName);
+			const userId = getCurrentUserId();
+			await apiClient.pushChanges(currentRepoName, userId);
 			pushSuccess = true;
 
 			// Clear success message after 3 seconds
@@ -305,7 +344,8 @@
 		gitError = null;
 
 		try {
-			await apiClient.fetchChanges(currentRepoName);
+			const userId = getCurrentUserId();
+			await apiClient.fetchChanges(currentRepoName, userId);
 			fetchSuccess = true;
 
 			// Refresh Git status after fetching
@@ -330,7 +370,8 @@
 		gitError = null;
 
 		try {
-			await apiClient.pullChanges(currentRepoName);
+			const userId = getCurrentUserId();
+			await apiClient.pullChanges(currentRepoName, userId);
 			pullSuccess = true;
 
 			// Refresh Git status after pulling
@@ -351,6 +392,61 @@
 	function getFileNameFromPath(path: string | null): string {
 		if (!path) return 'Untitled';
 		return path.split('/').pop() || path;
+	}
+
+	// AI Chat functions
+	async function handleAiChatMessage(event: CustomEvent<string>) {
+		const userMessage = event.detail;
+		
+		if (!currentRepoName) {
+			console.error('No repository selected for AI chat');
+			return;
+		}
+		
+		// Add user message
+		aiChatMessages = [
+			...aiChatMessages,
+			{
+				role: 'user',
+				content: userMessage,
+				timestamp: new Date()
+			}
+		];
+
+		// Set loading state
+		aiChatLoading = true;
+
+		try {
+			// Call Claude AI API
+			const userId = getCurrentUserId();
+			const response = await apiClient.sendClaudeMessage(currentRepoName, userMessage, userId);
+			
+			aiChatMessages = [
+				...aiChatMessages,
+				{
+					role: 'assistant',
+					content: response.response,
+					timestamp: new Date()
+				}
+			];
+		} catch (error) {
+			console.error('Claude AI error:', error);
+			
+			aiChatMessages = [
+				...aiChatMessages,
+				{
+					role: 'assistant',
+					content: `Sorry, I encountered an error: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again.`,
+					timestamp: new Date()
+				}
+			];
+		} finally {
+			aiChatLoading = false;
+		}
+	}
+
+	function handleClearAiChat() {
+		aiChatMessages = [];
 	}
 
 	// Layout functions
@@ -432,7 +528,7 @@
 	let rafId: number | null = null;
 	let pendingResizeEvent: MouseEvent | null = null;
 
-	function startResize(panel: 'filetree' | 'editor-pdf' | 'git-split', event: MouseEvent) {
+	function startResize(panel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat', event: MouseEvent) {
 		isResizing = true;
 		resizingPanel = panel;
 		event.preventDefault();
@@ -528,6 +624,16 @@
 
 				// Always update for smooth bidirectional resizing
 				gitPanelHeight = newHeight;
+			}
+		} else if (resizingPanel === 'ai-chat') {
+			// Calculate new height for AI chat panel within editor column
+			const editorColumn = document.querySelector('.main-content-area > div:first-child') as HTMLElement;
+			if (editorColumn) {
+				const rect = editorColumn.getBoundingClientRect();
+				const relativeY = newY - rect.top;
+				const availableHeight = rect.height;
+				const newHeight = availableHeight - relativeY;
+				aiChatHeight = Math.min(Math.max(newHeight, 200), 600); // 200px to 600px range
 			}
 		}
 	}
@@ -641,6 +747,18 @@
 				</button>
 			</div>
 
+			<!-- AI Chat Toggle -->
+			<button
+				on:click={() => showAiChat = !showAiChat}
+				class="text-gray-400 hover:text-white transition-colors p-2 rounded {showAiChat ? 'bg-blue-600 text-white' : ''}"
+				title="Toggle AI Chat"
+				aria-label="Toggle AI Chat"
+			>
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+				</svg>
+			</button>
+
 			{#if currentFilePath}
 				<div class="text-sm text-gray-300 flex items-center space-x-2">
 					<span>📄</span>
@@ -700,7 +818,8 @@
 	</header>
 
 	<!-- Main Editor Area -->
-	<div class="flex-1 flex overflow-hidden">
+	<div class="flex-1 flex flex-col overflow-hidden main-content-wrapper">
+		<div class="flex-1 flex overflow-hidden">
 		<!-- File Tree + Git Sidebar -->
 		<aside
 			class="bg-dark-800 border-r border-gray-700 relative flex flex-col"
@@ -711,17 +830,22 @@
 				class="overflow-y-auto border-b border-gray-700"
 				style="height: {100 - gitPanelHeight}%;"
 			>
-				<FileTree repoName={currentRepoName} onFileSelect={handleFileSelect} />
+				<FileTree repoName={currentRepoName} userId={getCurrentUserId()} onFileSelect={handleFileSelect} />
 			</div>
 
 			<!-- Git Panel Resize Handle -->
-			<div
+			<button
 				role="separator"
-				tabindex="0"
 				aria-label="Resize git panel"
-				class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors"
+				class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors border-0 p-0"
 				on:mousedown={(e) => startResize('git-split', e)}
-			></div>
+				on:keydown={(e) => {
+					if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+						e.preventDefault();
+						// Keyboard resize logic can be added here
+					}
+				}}
+			></button>
 
 			<!-- Git Panel (Bottom Half) -->
 			<div class="overflow-y-auto" style="height: {gitPanelHeight}%;">
@@ -923,13 +1047,18 @@
 			</div>
 
 			<!-- Sidebar Resize Handle -->
-			<div
+			<button
 				role="separator"
-				tabindex="0"
 				aria-label="Resize file tree panel"
-				class="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 bg-transparent transition-colors"
+				class="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 bg-transparent transition-colors border-0 p-0"
 				on:mousedown={(e) => startResize('filetree', e)}
-			></div>
+				on:keydown={(e) => {
+					if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+						e.preventDefault();
+						// Keyboard resize logic can be added here
+					}
+				}}
+			></button>
 		</aside>
 
 		<!-- Main Content Area (Editor + PDF) -->
@@ -951,7 +1080,7 @@
 						</div>
 					{/if}
 
-					<div class="flex-1 relative">
+					<div class="relative" style="flex: {showAiChat ? '1 1 auto' : '1 1 0'}; min-height: {showAiChat ? '300px' : '0'};">
 						<div bind:this={editorContainer} class="w-full h-full"></div>
 					</div>
 
@@ -971,19 +1100,56 @@
 							</div>
 						</div>
 					{/if}
+
+					<!-- AI Chat Panel Resize Handle -->
+					{#if showAiChat && (layoutMode === 'editor' || layoutMode === 'both')}
+						<button
+							role="separator"
+							aria-label="Resize AI chat panel"
+							class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors border-0 p-0"
+							on:mousedown={(e) => startResize('ai-chat', e)}
+							on:keydown={(e) => {
+								if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+									e.preventDefault();
+									// Keyboard resize logic can be added here
+								}
+							}}
+						></button>
+					{/if}
+
+					<!-- AI Chat Panel (only in editor column) -->
+					{#if showAiChat && (layoutMode === 'editor' || layoutMode === 'both')}
+						<div style="height: {aiChatHeight}px; flex-shrink: 0;">
+							<AiChatPanel 
+								isVisible={true} 
+								bind:height={aiChatHeight}
+								bind:messages={aiChatMessages}
+								isLoading={aiChatLoading}
+								on:heightChange={(e) => aiChatHeight = e.detail}
+								on:sendMessage={handleAiChatMessage}
+								on:clearMessages={handleClearAiChat}
+							/>
+						</div>
+					{/if}
 				</div>
 			{/if}
 
+
 			<!-- Resize Handle between Editor and PDF -->
 			{#if layoutMode === 'both'}
-				<div
+				<button
 					role="separator"
-					tabindex="0"
 					aria-label="Resize editor and PDF panels"
-					class="w-1 bg-gray-600 hover:bg-blue-500 cursor-col-resize transition-colors relative"
+					class="w-1 bg-gray-600 hover:bg-blue-500 cursor-col-resize transition-colors relative border-0 p-0"
 					style="transform: translateZ(0); will-change: background-color;"
 					on:mousedown={(e) => startResize('editor-pdf', e)}
-				></div>
+					on:keydown={(e) => {
+						if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+							e.preventDefault();
+							// Keyboard resize logic can be added here
+						}
+					}}
+				></button>
 			{/if}
 
 			<!-- PDF Preview -->
@@ -999,4 +1165,5 @@
 			{/if}
 		</div>
 	</div>
+</div>
 </div>

@@ -1,10 +1,14 @@
 import { browser } from '$app/environment';
 import type {
+	CloneRepoRequest,
 	CloneRepoResponse,
+	CompileRepoRequest,
 	CompileRepoResponse,
 	FileTreeResponse,
 	FileContentResponse,
+	SaveFileRequest,
 	SaveFileResponse,
+	CreateFileRequest,
 	CreateFileResponse,
 	CreateFolderResponse,
 	DeleteFileResponse,
@@ -13,7 +17,9 @@ import type {
 	GitPushResponse,
 	GitStatusResponse,
 	GitFetchResponse,
-	GitPullResponse
+	GitPullResponse,
+	ClaudeAiRequest,
+	ClaudeAiResponse
 } from '$types/api';
 
 const API_URL = browser ? import.meta.env.VITE_API_URL || 'http://localhost:3001' : 'http://localhost:3001';
@@ -44,10 +50,10 @@ class ApiClient {
 		return response.json();
 	}
 
-	async cloneRepo(repoUrl: string, userId = 'anonymous'): Promise<CloneRepoResponse> {
+	async cloneRepo(repoUrl: string, userId = 'anonymous', credentials?: { username: string; password: string }): Promise<CloneRepoResponse> {
 		return this.request<CloneRepoResponse>('/api/clone', {
 			method: 'POST',
-			body: JSON.stringify({ repoUrl, userId })
+			body: JSON.stringify({ repoUrl, userId, credentials })
 		});
 	}
 
@@ -198,6 +204,26 @@ class ApiClient {
 		return this.request<RenameFileResponse>(`/api/files/${userId}/${repoName}/rename`, {
 			method: 'PUT',
 			body: JSON.stringify({ oldPath, newPath })
+		});
+	}
+
+	async sendClaudeMessage(
+		repoName: string,
+		message: string,
+		userId = 'anonymous'
+	): Promise<ClaudeAiResponse> {
+		return this.request<ClaudeAiResponse>('/api/claude', {
+			method: 'POST',
+			body: JSON.stringify({ repoName, message, userId })
+		});
+	}
+
+	async ensureUserContainer(
+		repoName: string,
+		userId: string
+	): Promise<{ message: string; containerName: string; status: string; volumeName: string }> {
+		return this.request(`/api/containers/${userId}/${repoName}/ensure`, {
+			method: 'POST'
 		});
 	}
 }
