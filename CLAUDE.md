@@ -8,10 +8,11 @@ Underleaf is a collaborative LaTeX editor with real-time collaboration, AI assis
 
 ## Architecture
 
-**Monorepo Structure**: Frontend-Backend separation with Docker containerization
+**Multi-Tenant Container Architecture**: Frontend-Backend separation with per-user Docker isolation
 - **Frontend**: SvelteKit + TypeScript SPA with Tailwind CSS (port 5173)
-- **Backend**: Express.js REST API with TypeScript (port 3000)  
-- **LaTeX Processing**: Isolated Docker containers with TeXLive
+- **Backend**: Express.js REST API with TypeScript (port 3001)  
+- **LaTeX Processing**: Isolated per-user Docker containers with TeXLive
+- **Reverse Proxy**: Traefik for routing and load balancing (port 80)
 - **Development**: npm workspaces with concurrent dev servers
 
 ## Development Commands
@@ -26,6 +27,9 @@ npm run build --workspaces
 
 # Run linting across all packages
 npm run lint --workspaces
+
+# Type checking across all packages
+npm run type-check --workspaces
 ```
 
 ### Frontend-Specific Commands
@@ -44,30 +48,95 @@ npm run lint:fix
 svelte-kit sync
 ```
 
-### Individual Services
+### Backend-Specific Commands
 ```bash
 # Backend only (from /backend)  
 cd backend && npm run dev
 
-# Docker services
+# Build backend
+npm run build
+
+# Type checking
+npm run type-check
+```
+
+### Docker Development
+```bash
+# Start full multi-container environment
 docker-compose up
+
+# Setup container infrastructure
+./scripts/setup-containers.sh
+
+# Monitor container status
+./scripts/monitor-containers.sh
 ```
 
 ## Key Technologies
 
-- **Frontend**: SvelteKit, Svelte 5, TypeScript, Tailwind CSS, Monaco Editor
-- **Backend**: Express.js, TypeScript, simple-git, fs-extra
-- **Infrastructure**: Docker, docker-compose, TeXLive
-- **Build**: Vite with SvelteKit, ts-node-dev (backend), ESLint + Prettier
-- **Styling**: Tailwind CSS with custom dark theme and modern components
+### Frontend Stack
+- **SvelteKit**: Full-stack framework with file-based routing
+- **Svelte 5**: Modern reactive component framework
+- **TypeScript**: Strict type safety with ES2022 target
+- **Tailwind CSS**: Utility-first styling with custom theme
+- **Monaco Editor**: VS Code editor for LaTeX with syntax highlighting
+- **Supabase**: Authentication and user management
+
+### Backend Stack
+- **Express.js**: Web framework with TypeScript
+- **Dockerode**: Docker API integration for container management
+- **simple-git**: Git operations for repository management
+- **tar-stream**: File extraction from containers
+
+### Infrastructure
+- **Docker**: Container isolation for LaTeX environments
+- **Traefik**: Reverse proxy with automatic service discovery
+- **TeXLive**: Full LaTeX distribution in containers
+- **PDF.js**: Client-side PDF rendering
+
+## Container Architecture
+
+**Multi-Tenant Design**: Each user gets isolated LaTeX environment
+- User containers are created on-demand per repository
+- Docker volumes persist repository data across sessions
+- Container lifecycle automatically managed by backend
+- Traefik routes traffic to user-specific containers
+- Resources isolated between users for security
+
+**Container Service**: Located in `backend/src/services/containerService.ts`
+- Manages user container lifecycle
+- Handles volume mounting and data persistence
+- Executes commands in isolated environments
+- Provides cleanup and monitoring capabilities
 
 ## API Architecture
 
 The application uses shared TypeScript interfaces between frontend/backend:
 
-**Core Endpoints**:
-- `POST /api/clone` - Clone Git repositories 
-- `POST /api/compile` - Compile LaTeX documents via Docker
+### Core Endpoints
+- `POST /api/clone` - Clone Git repositories with authentication
+- `POST /api/compile` - Compile LaTeX documents via user containers
+- `GET /api/files/:userId/:repoName` - File tree navigation
+- `GET /api/files/:userId/:repoName/content` - File content reading
+- `PUT /api/files/:userId/:repoName/content` - File content saving
+- `GET /api/files/:userId/:repoName/pdf/*` - PDF serving with streaming
+
+### Git Operations
+- `GET /api/git/:userId/:repoName/status` - Git status with change tracking
+- `POST /api/git/:userId/:repoName/commit` - Commit changes
+- `POST /api/git/:userId/:repoName/push` - Push to remote
+- `POST /api/git/:userId/:repoName/pull` - Pull from remote
+
+### Claude AI Integration
+- `GET /api/claude/setup` - Check Claude authentication status
+- `POST /api/claude/interactive-setup` - Start Claude authentication flow
+- `POST /api/claude/verify-code` - Submit verification code
+- `POST /api/claude` - Send messages to Claude AI
+
+### Container Management
+- `POST /api/containers/:userId/:repoName/ensure` - Ensure container is running
+- `GET /api/containers/stats` - Global container statistics
+- `DELETE /api/containers/:userId/:repoName` - Remove user container
 
 **Shared Types**: Located in `frontend/src/lib/types/api.ts` and `backend/src/types/api.ts`
 
@@ -77,9 +146,14 @@ The application uses shared TypeScript interfaces between frontend/backend:
 - `frontend/src/routes/` - SvelteKit file-based routing
   - `+page.svelte` - Home page with repository cloning
   - `editor/+page.svelte` - LaTeX editor with Monaco integration
+  - `auth/callback/+page.svelte` - Supabase authentication callback
   - `+layout.svelte` - Root layout component
-- `frontend/src/lib/` - Library code with path aliases
+- `frontend/src/lib/` - Library code with path aliases (`$lib`)
   - `components/` - Reusable Svelte components (`$components`)
+    - `AiChatPanel.svelte` - Claude AI chat interface
+    - `AuthModal.svelte` - Authentication modal
+    - `FileTree.svelte` - File navigation component
+    - `PdfPreview.svelte` - PDF viewer component
   - `utils/` - Utility functions including API client (`$utils`)
   - `types/` - TypeScript type definitions (`$types`)
   - `stores/` - Svelte stores for state management (`$stores`)
@@ -87,56 +161,98 @@ The application uses shared TypeScript interfaces between frontend/backend:
 - `frontend/src/app.css` - Global styles with Tailwind
 
 ### Backend Structure
-- `backend/src/index.ts` - Express server with Git/LaTeX endpoints
-- `backend/src/types/` - API interface definitions
-- `docker/` - Container configurations for LaTeX compilation
+- `backend/src/index.ts` - Express server with comprehensive API endpoints
+- `backend/src/services/containerService.ts` - Container management service
+- `backend/src/types/api.ts` - API interface definitions
+- `docker/latex/Dockerfile` - LaTeX container configuration
 
-## Modern Features
+### Infrastructure
+- `docker-compose.yml` - Multi-service orchestration
+- `scripts/` - Setup and monitoring scripts for containers
+- `frontend/static/pdfjs/` - PDF.js library for client-side rendering
 
-### Frontend Optimizations
+## Authentication & Security
+
+**Supabase Integration**: Complete authentication system
+- User registration and login
+- Session management with secure cookies
+- Protected routes and API endpoints
+- Authentication callbacks and redirects
+
+**Multi-User Isolation**: Container-based security
+- Each user gets isolated file system access
+- Docker volumes prevent cross-user access
+- Path validation prevents directory traversal
+- Container cleanup on session end
+
+## Development Experience
+
+### Hot Reloading & Build
+- **Vite HMR**: Instant updates for Svelte, TypeScript, and CSS
+- **ts-node-dev**: Backend hot reloading with TypeScript
 - **Code Splitting**: Monaco Editor loaded as separate chunk
 - **Modern Build**: ES2022 target with esbuild minification
+
+### Code Quality
+- **ESLint**: Configured for Svelte and TypeScript
+- **Prettier**: Code formatting with Svelte plugin
+- **Type Checking**: Real-time validation with svelte-check
 - **Path Aliases**: Clean imports with `$lib`, `$components`, etc.
-- **Type Safety**: Strict TypeScript with svelte-check
-- **Performance**: Vite HMR with optimized dependencies
 
 ### Styling System
-- **Tailwind CSS**: Utility-first CSS framework
-- **Dark Theme**: Custom dark color palette with design tokens
+- **Tailwind CSS**: Utility-first with custom dark theme
 - **Component Classes**: Reusable button and input styles
 - **Responsive Design**: Mobile-first approach
-- **Modern Effects**: Backdrop blur, shadows, and smooth animations
-
-### Development Experience
-- **Hot Reloading**: Instant updates for Svelte, TypeScript, and CSS
-- **Linting**: ESLint with Svelte plugin and Prettier formatting
-- **Type Checking**: Real-time TypeScript validation
-- **Error Handling**: Global error boundaries and enhanced logging
-
-## Repository Management
-
-- Cloned repos stored in `../repos/{userId}/{repoName}/` structure
-- Git operations via simple-git library
-- LaTeX compilation through Docker exec to latex container
-- User isolation prepared for future authentication
+- **Modern Effects**: Backdrop blur, shadows, animations
 
 ## Environment Configuration
 
-- Copy `frontend/.env.example` to `frontend/.env` for local development
-- `VITE_API_URL` - Backend API endpoint (default: http://localhost:3000)
-- Environment variables prefixed with `VITE_` are exposed to client
-- Use `PUBLIC_` prefix for SvelteKit public environment variables
+### Development Setup
+- Node.js 18+ required for ES2022 features
+- Docker required for LaTeX compilation
+- Ports 80 (Traefik), 3001 (backend), 5173 (frontend)
 
-### Claude AI Integration
+### Environment Variables
+- `VITE_API_URL` - Backend API endpoint (default: http://localhost:3001)
+- `PUBLIC_SUPABASE_URL` - Supabase project URL
+- `PUBLIC_SUPABASE_ANON_KEY` - Supabase anonymous key
+- `ANTHROPIC_API_KEY` - Claude AI API key for backend
 
-- Set `ANTHROPIC_API_KEY` environment variable to enable Claude AI features
-- Get your API key from [Anthropic Console](https://console.anthropic.com/)
-- Claude Code CLI (v1.0.18) is installed in LaTeX containers for AI assistance
-- AI panel allows natural language interaction with your LaTeX projects
+### Claude AI Setup
+- Set `ANTHROPIC_API_KEY` in backend environment
+- Get API key from [Anthropic Console](https://console.anthropic.com/)
+- Claude Code CLI installed in LaTeX containers
+- Interactive authentication flow through UI
 
-## Environment Requirements
+## Repository Management
 
-- Node.js 18+ (for ES2022 features and SvelteKit)
-- Docker (required for LaTeX compilation)
-- Ports 3000 (backend) and 5173 (frontend) available
-- Sufficient disk space for Git repository storage
+**Git Integration**: Full Git workflow support
+- Repository cloning with credential handling
+- Overleaf and GitHub/GitLab authentication
+- Commit, push, pull operations through containers
+- Status tracking with change detection
+
+**File Operations**: Complete file management
+- Real-time file tree navigation
+- File content editing and saving
+- PDF compilation and preview
+- Directory creation and file operations
+
+## Key Implementation Details
+
+**Container Lifecycle**: Automatic management in `containerService.ts`
+- On-demand container creation per user/repository
+- Volume persistence across container restarts
+- Cleanup policies to prevent resource exhaustion
+- Health monitoring and automatic recovery
+
+**PDF Processing**: Secure file serving
+- Direct container file extraction using Docker API
+- Streaming PDF delivery to client
+- PDF.js integration for client-side rendering
+- Security validation and path checking
+
+**Real-time Features**: Live collaboration preparation
+- File change detection through Git status
+- Container state synchronization
+- Event-driven architecture for updates

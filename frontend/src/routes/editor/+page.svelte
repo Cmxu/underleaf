@@ -4,6 +4,7 @@
 	import FileTree from '$components/FileTree.svelte';
 	import PdfPreview from '$components/PdfPreview.svelte';
 	import AiChatPanel from '$components/AiChatPanel.svelte';
+	import ClaudeCodeModal from '$components/ClaudeCodeModal.svelte';
 	import { apiClient } from '$lib/utils/api';
 	import { authStore } from '$lib/stores/auth';
 	import type { GitStatusResponse } from '$lib/types/api';
@@ -30,9 +31,24 @@
 
 	// AI Chat Panel state
 	let showAiChat = false;
-	let aiChatHeight = 300; // Default height in pixels
-	let aiChatMessages: Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }> = [];
+	let aiChatHeight = 400; // Default height in pixels
+	let aiChatMessages: Array<{ 
+		role: 'user' | 'assistant'; 
+		content: string; 
+		timestamp: Date;
+		contentBlocks?: Array<{ 
+			type: 'text' | 'tool_call'; 
+			content?: string; 
+			toolCall?: { name: string; id: string; arguments: any; expanded?: boolean };
+		}>;
+	}> = [];
 	let aiChatLoading = false;
+
+	// Claude Code Modal state
+	let showClaudeCodeModal = false;
+	let claudeAuthUrl = '';
+	let claudeSessionId = '';
+	let claudeCodeSubmitting = false;
 
 	// Git state
 	let gitStatus: GitStatusResponse | null = null;
@@ -83,14 +99,15 @@
 			console.log(`Ensuring container is running for user ${userId} with repo ${currentRepoName}`);
 			const containerInfo = await apiClient.ensureUserContainer(currentRepoName, userId);
 			console.log('Container ready:', containerInfo);
-			
+
 			// Verify repository is accessible by trying to get file tree
 			try {
 				await apiClient.getFileTree(currentRepoName, userId);
 				console.log('Repository verified and accessible');
 			} catch (fileTreeError) {
 				console.error('Repository not accessible, may need to be cloned:', fileTreeError);
-				compileError = 'Repository not found. Please return to home and clone the repository again.';
+				compileError =
+					'Repository not found. Please return to home and clone the repository again.';
 			}
 		} catch (error) {
 			console.error('Failed to ensure container is running:', error);
@@ -116,7 +133,6 @@
 
 			// Register LaTeX language if not already registered
 			if (!monaco.languages.getLanguages().find((lang: any) => lang.id === 'latex')) {
-				 
 				monaco.languages.register({ id: 'latex' });
 
 				// Basic LaTeX syntax highlighting
@@ -397,12 +413,12 @@
 	// AI Chat functions
 	async function handleAiChatMessage(event: CustomEvent<string>) {
 		const userMessage = event.detail;
-		
+
 		if (!currentRepoName) {
 			console.error('No repository selected for AI chat');
 			return;
 		}
-		
+
 		// Add user message
 		aiChatMessages = [
 			...aiChatMessages,
@@ -415,23 +431,131 @@
 
 		// Set loading state
 		aiChatLoading = true;
+		let currentAssistantMessageIndex = -1;
 
 		try {
-			// Call Claude AI API
+			// Call Claude AI API with streaming
 			const userId = getCurrentUserId();
-			const response = await apiClient.sendClaudeMessage(currentRepoName, userMessage, userId);
 			
-			aiChatMessages = [
-				...aiChatMessages,
-				{
-					role: 'assistant',
-					content: response.response,
-					timestamp: new Date()
-				}
-			];
+			await apiClient.sendClaudeMessageStreaming(
+				currentRepoName, 
+				userMessage, 
+				(chunk: string) => {
+					// Check if chunk contains tool call data
+					const toolCallMatch = chunk.match(/__TOOL_CALL_START__(.+?)__TOOL_CALL_END__/);
+					if (toolCallMatch) {
+						try {
+							const toolCallData = JSON.parse(toolCallMatch[1]);
+							
+							// If this is the first chunk or we need a new message, create one
+							if (currentAssistantMessageIndex === -1) {
+								aiChatMessages = [
+									...aiChatMessages,
+									{
+										role: 'assistant',
+										content: '',
+										timestamp: new Date(),
+										contentBlocks: [{
+											type: 'tool_call',
+											toolCall: {
+												name: toolCallData.name,
+												id: toolCallData.id,
+												arguments: toolCallData.arguments,
+												expanded: false
+											}
+										}]
+									}
+								];
+								currentAssistantMessageIndex = aiChatMessages.length - 1;
+							} else {
+								// Add tool call to existing message in order
+								aiChatMessages = aiChatMessages.map((msg, index) => {
+									if (index === currentAssistantMessageIndex) {
+										const existingBlocks = msg.contentBlocks || [];
+										return {
+											...msg,
+											contentBlocks: [...existingBlocks, {
+												type: 'tool_call',
+												toolCall: {
+													name: toolCallData.name,
+													id: toolCallData.id,
+													arguments: toolCallData.arguments,
+													expanded: false
+												}
+											}]
+										};
+									}
+									return msg;
+								});
+							}
+						} catch (error) {
+							console.error('Failed to parse tool call data:', error);
+							// Fall back to treating as regular text
+							processRegularChunk(chunk);
+						}
+					} else {
+						// Regular text chunk
+						processRegularChunk(chunk);
+					}
+
+					function processRegularChunk(textChunk: string) {
+						// If this is the first chunk or we need a new message, create one
+						if (currentAssistantMessageIndex === -1) {
+							// Add new assistant message
+							aiChatMessages = [
+								...aiChatMessages,
+								{
+									role: 'assistant',
+									content: textChunk,
+									timestamp: new Date(),
+									contentBlocks: [{
+										type: 'text',
+										content: textChunk
+									}]
+								}
+							];
+							currentAssistantMessageIndex = aiChatMessages.length - 1;
+						} else {
+							// Update the current assistant message content as chunks arrive
+							aiChatMessages = aiChatMessages.map((msg, index) => {
+								if (index === currentAssistantMessageIndex) {
+									const existingBlocks = msg.contentBlocks || [];
+									const lastBlock = existingBlocks[existingBlocks.length - 1];
+									
+									// If the last block is text, append to it; otherwise create new text block
+									if (lastBlock && lastBlock.type === 'text') {
+										const updatedBlocks = [...existingBlocks];
+										updatedBlocks[updatedBlocks.length - 1] = {
+											...lastBlock,
+											content: (lastBlock.content || '') + textChunk
+										};
+										return {
+											...msg,
+											content: msg.content + textChunk,
+											contentBlocks: updatedBlocks
+										};
+									} else {
+										return {
+											...msg,
+											content: msg.content + textChunk,
+											contentBlocks: [...existingBlocks, {
+												type: 'text',
+												content: textChunk
+											}]
+										};
+									}
+								}
+								return msg;
+							});
+						}
+					}
+				},
+				userId
+			);
 		} catch (error) {
 			console.error('Claude AI error:', error);
-			
+
+			// Add error message
 			aiChatMessages = [
 				...aiChatMessages,
 				{
@@ -445,8 +569,207 @@
 		}
 	}
 
-	function handleClearAiChat() {
+	async function handleClearAiChat() {
 		aiChatMessages = [];
+		
+		// Clear Claude session for multi-turn conversations
+		if (currentRepoName) {
+			try {
+				const userId = getCurrentUserId();
+				const result = await apiClient.clearClaudeSession(currentRepoName, userId);
+				console.log('🗑️ Cleared Claude session:', result.message);
+			} catch (error) {
+				console.warn('Failed to clear Claude session:', error);
+				// Don't show error to user as this is not critical
+			}
+		}
+	}
+
+	// Claude Code Modal functions
+	function handleClaudeCodeRequired(event: CustomEvent<{ authUrl: string; sessionId: string }>) {
+		claudeAuthUrl = event.detail.authUrl;
+		claudeSessionId = event.detail.sessionId;
+		showClaudeCodeModal = true;
+	}
+
+	async function handleClaudeCodeSubmit(
+		event: CustomEvent<{ verificationCode: string; sessionId: string }>
+	) {
+		const { verificationCode, sessionId } = event.detail;
+
+		if (!currentRepoName) {
+			console.error('No repository selected for Claude code verification');
+			claudeCodeSubmitting = false;
+			return;
+		}
+
+		claudeCodeSubmitting = true;
+		console.log('🔐 Submitting Claude verification code:', verificationCode);
+
+		try {
+			const userId = getCurrentUserId();
+			const result = await apiClient.verifyClaudeCode(
+				currentRepoName,
+				verificationCode,
+				sessionId,
+				userId
+			);
+
+			console.log('🔐 Claude verification result:', result);
+
+					if (result.configured) {
+			// Success - close modal and show success message
+			showClaudeCodeModal = false;
+			
+			// Stop any ongoing auth status checking
+			if (authStatusCheckInterval) {
+				clearInterval(authStatusCheckInterval);
+				authStatusCheckInterval = null;
+			}
+
+			// Add success message to AI chat
+			aiChatMessages = [
+				...aiChatMessages,
+				{
+					role: 'assistant',
+					content:
+						'🎉 Claude AI has been successfully authenticated! You can now use AI assistance for your LaTeX projects.',
+					timestamp: new Date()
+				}
+			];
+			} else if (result.error) {
+				// Error - show in AI chat and close modal to restart process
+				showClaudeCodeModal = false;
+				aiChatMessages = [
+					...aiChatMessages,
+					{
+						role: 'assistant',
+						content: `❌ Authentication failed: ${result.error}. Please try the setup process again.`,
+						timestamp: new Date()
+					}
+				];
+			} else {
+				// Still processing - show interim message and keep modal open
+				aiChatMessages = [
+					...aiChatMessages,
+					{
+						role: 'assistant',
+						content: `⏳ Verification code submitted successfully. Claude is processing your authentication - this may take up to 60 seconds...`,
+						timestamp: new Date()
+					}
+				];
+			}
+		} catch (error) {
+			console.error('Claude code verification error:', error);
+
+			const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+			
+			// For timeout or long-running authentication, don't show error - show progress message
+			if (errorMessage.includes('timeout') || errorMessage.includes('Authentication timeout') || errorMessage.includes('no response')) {
+				// Keep modal open and show waiting message - authentication may still be processing
+				aiChatMessages = [
+					...aiChatMessages,
+					{
+						role: 'assistant',
+						content: `⏳ Authentication is processing and may take up to 2 minutes. Please wait while we verify your code...`,
+						timestamp: new Date()
+					}
+				];
+
+				// Start periodic check for authentication completion
+				startAuthStatusCheck();
+			} else {
+				// Close modal and show error message for actual errors
+				showClaudeCodeModal = false;
+				aiChatMessages = [
+					...aiChatMessages,
+					{
+						role: 'assistant',
+						content: `❌ Verification failed: ${errorMessage}. Please try the setup process again.`,
+						timestamp: new Date()
+					}
+				];
+			}
+		} finally {
+			claudeCodeSubmitting = false;
+		}
+	}
+
+	function handleClaudeCodeCancel() {
+		showClaudeCodeModal = false;
+		claudeAuthUrl = '';
+		claudeSessionId = '';
+		
+		// Stop any ongoing auth status checking
+		if (authStatusCheckInterval) {
+			clearInterval(authStatusCheckInterval);
+			authStatusCheckInterval = null;
+		}
+	}
+
+	let authStatusCheckInterval: NodeJS.Timeout | null = null;
+
+	function startAuthStatusCheck() {
+		// Clear any existing interval
+		if (authStatusCheckInterval) {
+			clearInterval(authStatusCheckInterval);
+		}
+
+		let checkCount = 0;
+		const maxChecks = 15; // Check for 2.5 more minutes (10s * 15 = 150s)
+
+		authStatusCheckInterval = setInterval(async () => {
+			checkCount++;
+			console.log(`Auth status check ${checkCount}/${maxChecks}: checking authentication status...`);
+
+			if (checkCount > maxChecks || !currentRepoName) {
+				clearInterval(authStatusCheckInterval!);
+				authStatusCheckInterval = null;
+
+				// Only show timeout if modal is still open (authentication hasn't completed)
+				if (showClaudeCodeModal) {
+					showClaudeCodeModal = false;
+					aiChatMessages = [
+						...aiChatMessages,
+						{
+							role: 'assistant',
+							content: `❌ Authentication timed out after waiting ${Math.floor(maxChecks * 10 / 60)} minutes. Please try the setup process again.`,
+							timestamp: new Date()
+						}
+					];
+				}
+				return;
+			}
+
+			try {
+				// Check if Claude is now configured by trying to send a simple status message
+				const userId = getCurrentUserId();
+				const result = await apiClient.sendClaudeMessage(currentRepoName, '/status', userId);
+
+				if (result && result.response && !result.response.includes('not configured') && !result.response.includes('not authenticated')) {
+					// Authentication successful!
+					clearInterval(authStatusCheckInterval!);
+					authStatusCheckInterval = null;
+					
+					// Only close modal and show success if not already handled
+					if (showClaudeCodeModal) {
+						showClaudeCodeModal = false;
+						aiChatMessages = [
+							...aiChatMessages,
+							{
+								role: 'assistant',
+								content: '🎉 Claude AI authentication completed successfully! You can now use AI assistance.',
+								timestamp: new Date()
+							}
+						];
+					}
+					console.log('✅ Authentication check successful - Claude is now configured');
+				}
+			} catch (error) {
+				// Still not ready, continue checking
+				console.log(`Auth status check ${checkCount}/${maxChecks}: still waiting...`);
+			}
+		}, 10000); // Check every 10 seconds
 	}
 
 	// Layout functions
@@ -528,7 +851,10 @@
 	let rafId: number | null = null;
 	let pendingResizeEvent: MouseEvent | null = null;
 
-	function startResize(panel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat', event: MouseEvent) {
+	function startResize(
+		panel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat',
+		event: MouseEvent
+	) {
 		isResizing = true;
 		resizingPanel = panel;
 		event.preventDefault();
@@ -626,14 +952,16 @@
 				gitPanelHeight = newHeight;
 			}
 		} else if (resizingPanel === 'ai-chat') {
-			// Calculate new height for AI chat panel within editor column
-			const editorColumn = document.querySelector('.main-content-area > div:first-child') as HTMLElement;
-			if (editorColumn) {
-				const rect = editorColumn.getBoundingClientRect();
+			// Calculate new height for AI chat panel within PDF column
+			const pdfColumn = document.querySelector(
+				'.main-content-area > div:last-child'
+			) as HTMLElement;
+			if (pdfColumn) {
+				const rect = pdfColumn.getBoundingClientRect();
 				const relativeY = newY - rect.top;
 				const availableHeight = rect.height;
 				const newHeight = availableHeight - relativeY;
-				aiChatHeight = Math.min(Math.max(newHeight, 200), 600); // 200px to 600px range
+				aiChatHeight = Math.min(Math.max(newHeight, 200), 800); // 200px to 800px range
 			}
 		}
 	}
@@ -749,13 +1077,20 @@
 
 			<!-- AI Chat Toggle -->
 			<button
-				on:click={() => showAiChat = !showAiChat}
-				class="text-gray-400 hover:text-white transition-colors p-2 rounded {showAiChat ? 'bg-blue-600 text-white' : ''}"
+				on:click={() => (showAiChat = !showAiChat)}
+				class="text-gray-400 hover:text-white transition-colors p-2 rounded {showAiChat
+					? 'bg-blue-600 text-white'
+					: ''}"
 				title="Toggle AI Chat"
 				aria-label="Toggle AI Chat"
 			>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+					<path
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						stroke-width="2"
+						d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
+					/>
 				</svg>
 			</button>
 
@@ -820,329 +1155,242 @@
 	<!-- Main Editor Area -->
 	<div class="flex-1 flex flex-col overflow-hidden main-content-wrapper">
 		<div class="flex-1 flex overflow-hidden">
-		<!-- File Tree + Git Sidebar -->
-		<aside
-			class="bg-dark-800 border-r border-gray-700 relative flex flex-col"
-			style="width: {fileTreeWidth}px;"
-		>
-			<!-- File Tree (Top Half) -->
-			<div
-				class="overflow-y-auto border-b border-gray-700"
-				style="height: {100 - gitPanelHeight}%;"
+			<!-- File Tree + Git Sidebar -->
+			<aside
+				class="bg-dark-800 border-r border-gray-700 relative flex flex-col"
+				style="width: {fileTreeWidth}px;"
 			>
-				<FileTree repoName={currentRepoName} userId={getCurrentUserId()} onFileSelect={handleFileSelect} />
-			</div>
+				<!-- File Tree (Top Half) -->
+				<div
+					class="overflow-y-auto border-b border-gray-700"
+					style="height: {100 - gitPanelHeight}%;"
+				>
+					<FileTree
+						repoName={currentRepoName}
+						userId={getCurrentUserId()}
+						onFileSelect={handleFileSelect}
+					/>
+				</div>
 
-			<!-- Git Panel Resize Handle -->
-			<button
-				role="separator"
-				aria-label="Resize git panel"
-				class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors border-0 p-0"
-				on:mousedown={(e) => startResize('git-split', e)}
-				on:keydown={(e) => {
-					if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-						e.preventDefault();
-						// Keyboard resize logic can be added here
-					}
-				}}
-			></button>
+				<!-- Git Panel Resize Handle -->
+				<button
+					role="separator"
+					aria-label="Resize git panel"
+					class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors border-0 p-0"
+					on:mousedown={(e) => startResize('git-split', e)}
+					on:keydown={(e) => {
+						if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+							e.preventDefault();
+							// Keyboard resize logic can be added here
+						}
+					}}
+				></button>
 
-			<!-- Git Panel (Bottom Half) -->
-			<div class="overflow-y-auto" style="height: {gitPanelHeight}%;">
-				<div class="p-4">
-					<div class="flex items-center justify-between mb-4">
-						<h3 class="text-lg font-medium text-white">Git Operations</h3>
-						<button
-							on:click={handleRefreshGitStatus}
-							class="text-gray-400 hover:text-white transition-colors"
-							title="Refresh Git status"
-							aria-label="Refresh Git status"
-						>
-							<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-								<path
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									stroke-width="2"
-									d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-								/>
-							</svg>
-						</button>
-					</div>
-
-					{#if gitError}
-						<div class="bg-red-500/10 border border-red-500/20 rounded p-3 mb-4">
-							<p class="text-red-300 text-sm">{gitError}</p>
+				<!-- Git Panel (Bottom Half) -->
+				<div class="overflow-y-auto" style="height: {gitPanelHeight}%;">
+					<div class="p-4">
+						<div class="flex items-center justify-between mb-4">
+							<h3 class="text-lg font-medium text-white">Git Operations</h3>
+							<button
+								on:click={handleRefreshGitStatus}
+								class="text-gray-400 hover:text-white transition-colors"
+								title="Refresh Git status"
+								aria-label="Refresh Git status"
+							>
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+									<path
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										stroke-width="2"
+										d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+									/>
+								</svg>
+							</button>
 						</div>
-					{/if}
 
-					{#if commitSuccess}
-						<div class="bg-green-500/10 border border-green-500/20 rounded p-3 mb-4">
-							<p class="text-green-300 text-sm">Changes committed successfully!</p>
-						</div>
-					{/if}
+						{#if gitError}
+							<div class="bg-red-500/10 border border-red-500/20 rounded p-3 mb-4">
+								<p class="text-red-300 text-sm">{gitError}</p>
+							</div>
+						{/if}
 
-					{#if pushSuccess}
-						<div class="bg-green-500/10 border border-green-500/20 rounded p-3 mb-4">
-							<p class="text-green-300 text-sm">Changes pushed successfully!</p>
-						</div>
-					{/if}
+						{#if commitSuccess}
+							<div class="bg-green-500/10 border border-green-500/20 rounded p-3 mb-4">
+								<p class="text-green-300 text-sm">Changes committed successfully!</p>
+							</div>
+						{/if}
 
-					{#if fetchSuccess}
-						<div class="bg-yellow-500/10 border border-yellow-500/20 rounded p-3 mb-4">
-							<p class="text-yellow-300 text-sm">Changes fetched successfully!</p>
-						</div>
-					{/if}
+						{#if pushSuccess}
+							<div class="bg-green-500/10 border border-green-500/20 rounded p-3 mb-4">
+								<p class="text-green-300 text-sm">Changes pushed successfully!</p>
+							</div>
+						{/if}
 
-					{#if pullSuccess}
-						<div class="bg-purple-500/10 border border-purple-500/20 rounded p-3 mb-4">
-							<p class="text-purple-300 text-sm">Changes pulled successfully!</p>
-						</div>
-					{/if}
+						{#if fetchSuccess}
+							<div class="bg-yellow-500/10 border border-yellow-500/20 rounded p-3 mb-4">
+								<p class="text-yellow-300 text-sm">Changes fetched successfully!</p>
+							</div>
+						{/if}
 
-					{#if gitStatus}
-						<div class="mb-6">
-							<h4 class="text-sm font-medium text-gray-300 mb-2">Repository Status</h4>
-							<div class="mb-3 pb-2 border-b border-gray-600">
-								<p class="text-blue-400 text-sm">
-									<svg class="w-4 h-4 inline mr-1" fill="currentColor" viewBox="0 0 20 20">
-										<path
-											fill-rule="evenodd"
-											d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 11-1.414 1.414L2.586 7l3.707-3.707a1 1 0 011.414 0z"
-										/>
-									</svg>
-									Branch: {gitStatus.currentBranch}
-								</p>
-								{#if gitStatus.tracking}
-									<p class="text-gray-400 text-xs">Tracking: {gitStatus.tracking}</p>
+						{#if pullSuccess}
+							<div class="bg-purple-500/10 border border-purple-500/20 rounded p-3 mb-4">
+								<p class="text-purple-300 text-sm">Changes pulled successfully!</p>
+							</div>
+						{/if}
+
+						{#if gitStatus}
+							<div class="mb-6">
+								<h4 class="text-sm font-medium text-gray-300 mb-2">Repository Status</h4>
+								<div class="mb-3 pb-2 border-b border-gray-600">
+									<p class="text-blue-400 text-sm">
+										<svg class="w-4 h-4 inline mr-1" fill="currentColor" viewBox="0 0 20 20">
+											<path
+												fill-rule="evenodd"
+												d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 11-1.414 1.414L2.586 7l3.707-3.707a1 1 0 011.414 0z"
+											/>
+										</svg>
+										Branch: {gitStatus.currentBranch}
+									</p>
+									{#if gitStatus.tracking}
+										<p class="text-gray-400 text-xs">Tracking: {gitStatus.tracking}</p>
+									{/if}
+								</div>
+								{#if gitStatus.clean}
+									<p class="text-green-400 text-sm">✓ Working directory clean</p>
+								{:else}
+									<div class="space-y-2">
+										{#if gitStatus.modified.length > 0}
+											<div>
+												<p class="text-yellow-400 text-sm font-medium">
+													Modified ({gitStatus.modified.length})
+												</p>
+												{#each gitStatus.modified as file}
+													<p class="text-gray-400 text-xs ml-2">• {file}</p>
+												{/each}
+											</div>
+										{/if}
+										{#if gitStatus.untracked.length > 0}
+											<div>
+												<p class="text-red-400 text-sm font-medium">
+													Untracked ({gitStatus.untracked.length})
+												</p>
+												{#each gitStatus.untracked as file}
+													<p class="text-gray-400 text-xs ml-2">• {file}</p>
+												{/each}
+											</div>
+										{/if}
+										{#if gitStatus.added.length > 0}
+											<div>
+												<p class="text-green-400 text-sm font-medium">
+													Added ({gitStatus.added.length})
+												</p>
+												{#each gitStatus.added as file}
+													<p class="text-gray-400 text-xs ml-2">• {file}</p>
+												{/each}
+											</div>
+										{/if}
+										{#if gitStatus.deleted.length > 0}
+											<div>
+												<p class="text-red-400 text-sm font-medium">
+													Deleted ({gitStatus.deleted.length})
+												</p>
+												{#each gitStatus.deleted as file}
+													<p class="text-gray-400 text-xs ml-2">• {file}</p>
+												{/each}
+											</div>
+										{/if}
+									</div>
 								{/if}
 							</div>
-							{#if gitStatus.clean}
-								<p class="text-green-400 text-sm">✓ Working directory clean</p>
-							{:else}
-								<div class="space-y-2">
-									{#if gitStatus.modified.length > 0}
-										<div>
-											<p class="text-yellow-400 text-sm font-medium">
-												Modified ({gitStatus.modified.length})
-											</p>
-											{#each gitStatus.modified as file}
-												<p class="text-gray-400 text-xs ml-2">• {file}</p>
-											{/each}
-										</div>
-									{/if}
-									{#if gitStatus.untracked.length > 0}
-										<div>
-											<p class="text-red-400 text-sm font-medium">
-												Untracked ({gitStatus.untracked.length})
-											</p>
-											{#each gitStatus.untracked as file}
-												<p class="text-gray-400 text-xs ml-2">• {file}</p>
-											{/each}
-										</div>
-									{/if}
-									{#if gitStatus.added.length > 0}
-										<div>
-											<p class="text-green-400 text-sm font-medium">
-												Added ({gitStatus.added.length})
-											</p>
-											{#each gitStatus.added as file}
-												<p class="text-gray-400 text-xs ml-2">• {file}</p>
-											{/each}
-										</div>
-									{/if}
-									{#if gitStatus.deleted.length > 0}
-										<div>
-											<p class="text-red-400 text-sm font-medium">
-												Deleted ({gitStatus.deleted.length})
-											</p>
-											{#each gitStatus.deleted as file}
-												<p class="text-gray-400 text-xs ml-2">• {file}</p>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/if}
-						</div>
-					{/if}
+						{/if}
 
-					<!-- Fetch and Pull buttons -->
-					<div class="flex space-x-2 mb-4">
-						<button
-							on:click={handleFetch}
-							disabled={isFetching || !currentRepoName}
-							class="flex-1 bg-yellow-600 hover:bg-yellow-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
-						>
-							{#if isFetching}
-								<div class="flex items-center justify-center space-x-2">
-									<div class="loading-spinner w-4 h-4"></div>
-									<span>Fetching...</span>
-								</div>
-							{:else}
-								Fetch
-							{/if}
-						</button>
-						<button
-							on:click={handlePull}
-							disabled={isPulling || !currentRepoName}
-							class="flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
-						>
-							{#if isPulling}
-								<div class="flex items-center justify-center space-x-2">
-									<div class="loading-spinner w-4 h-4"></div>
-									<span>Pulling...</span>
-								</div>
-							{:else}
-								Pull
-							{/if}
-						</button>
-					</div>
-
-					{#if gitStatus && !gitStatus.clean}
-						<div class="mb-4">
-							<label for="commit-message" class="block text-sm font-medium text-gray-300 mb-2">
-								Commit Message
-							</label>
-							<textarea
-								id="commit-message"
-								bind:value={commitMessage}
-								placeholder="Enter commit message..."
-								class="w-full px-3 py-2 bg-dark-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 text-sm"
-								rows="3"
-							></textarea>
-						</div>
-
+						<!-- Fetch and Pull buttons -->
 						<div class="flex space-x-2 mb-4">
 							<button
-								on:click={handleCommit}
-								disabled={isCommitting || !commitMessage.trim()}
-								class="flex-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
+								on:click={handleFetch}
+								disabled={isFetching || !currentRepoName}
+								class="flex-1 bg-yellow-600 hover:bg-yellow-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
 							>
-								{#if isCommitting}
+								{#if isFetching}
 									<div class="flex items-center justify-center space-x-2">
 										<div class="loading-spinner w-4 h-4"></div>
-										<span>Committing...</span>
+										<span>Fetching...</span>
 									</div>
 								{:else}
-									Commit Changes
+									Fetch
+								{/if}
+							</button>
+							<button
+								on:click={handlePull}
+								disabled={isPulling || !currentRepoName}
+								class="flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
+							>
+								{#if isPulling}
+									<div class="flex items-center justify-center space-x-2">
+										<div class="loading-spinner w-4 h-4"></div>
+										<span>Pulling...</span>
+									</div>
+								{:else}
+									Pull
 								{/if}
 							</button>
 						</div>
-					{/if}
 
-					<button
-						on:click={handlePush}
-						disabled={isPushing || !currentRepoName}
-						class="w-full bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
-					>
-						{#if isPushing}
-							<div class="flex items-center justify-center space-x-2">
-								<div class="loading-spinner w-4 h-4"></div>
-								<span>Pushing...</span>
+						{#if gitStatus && !gitStatus.clean}
+							<div class="mb-4">
+								<label for="commit-message" class="block text-sm font-medium text-gray-300 mb-2">
+									Commit Message
+								</label>
+								<textarea
+									id="commit-message"
+									bind:value={commitMessage}
+									placeholder="Enter commit message..."
+									class="w-full px-3 py-2 bg-dark-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 text-sm"
+									rows="3"
+								></textarea>
 							</div>
-						{:else}
-							Push to Remote
+
+							<div class="flex space-x-2 mb-4">
+								<button
+									on:click={handleCommit}
+									disabled={isCommitting || !commitMessage.trim()}
+									class="flex-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
+								>
+									{#if isCommitting}
+										<div class="flex items-center justify-center space-x-2">
+											<div class="loading-spinner w-4 h-4"></div>
+											<span>Committing...</span>
+										</div>
+									{:else}
+										Commit Changes
+									{/if}
+								</button>
+							</div>
 						{/if}
-					</button>
-				</div>
-			</div>
 
-			<!-- Sidebar Resize Handle -->
-			<button
-				role="separator"
-				aria-label="Resize file tree panel"
-				class="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 bg-transparent transition-colors border-0 p-0"
-				on:mousedown={(e) => startResize('filetree', e)}
-				on:keydown={(e) => {
-					if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-						e.preventDefault();
-						// Keyboard resize logic can be added here
-					}
-				}}
-			></button>
-		</aside>
-
-		<!-- Main Content Area (Editor + PDF) -->
-		<div class="flex-1 flex main-content-area" style="contain: layout style;">
-			<!-- Editor -->
-			{#if layoutMode === 'editor' || layoutMode === 'both'}
-				<div
-					class="flex flex-col {layoutMode === 'both' ? '' : 'flex-1'}"
-					style={layoutMode === 'both'
-						? `width: ${editorWidth}%; transform: translateZ(0); will-change: width;`
-						: 'transform: translateZ(0);'}
-				>
-					{#if currentFilePath}
-						<div
-							class="bg-dark-700 px-4 py-2 border-b border-gray-600 text-sm text-gray-300 flex items-center justify-between"
-						>
-							<span>Editing: {getFileNameFromPath(currentFilePath)}</span>
-							<span class="text-xs text-gray-500">Auto-save enabled</span>
-						</div>
-					{/if}
-
-					<div class="relative" style="flex: {showAiChat ? '1 1 auto' : '1 1 0'}; min-height: {showAiChat ? '300px' : '0'};">
-						<div bind:this={editorContainer} class="w-full h-full"></div>
-					</div>
-
-					{#if compileError}
-						<div class="bg-red-500/10 border-t border-red-500/20 p-4 text-red-300">
-							<div class="flex items-start space-x-2">
-								<svg class="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-									<path
-										fill-rule="evenodd"
-										d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
-									/>
-								</svg>
-								<div>
-									<p class="font-medium">Compilation Error</p>
-									<p class="text-sm text-red-200 mt-1">{compileError}</p>
-								</div>
-							</div>
-						</div>
-					{/if}
-
-					<!-- AI Chat Panel Resize Handle -->
-					{#if showAiChat && (layoutMode === 'editor' || layoutMode === 'both')}
 						<button
-							role="separator"
-							aria-label="Resize AI chat panel"
-							class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors border-0 p-0"
-							on:mousedown={(e) => startResize('ai-chat', e)}
-							on:keydown={(e) => {
-								if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-									e.preventDefault();
-									// Keyboard resize logic can be added here
-								}
-							}}
-						></button>
-					{/if}
-
-					<!-- AI Chat Panel (only in editor column) -->
-					{#if showAiChat && (layoutMode === 'editor' || layoutMode === 'both')}
-						<div style="height: {aiChatHeight}px; flex-shrink: 0;">
-							<AiChatPanel 
-								isVisible={true} 
-								bind:height={aiChatHeight}
-								bind:messages={aiChatMessages}
-								isLoading={aiChatLoading}
-								on:heightChange={(e) => aiChatHeight = e.detail}
-								on:sendMessage={handleAiChatMessage}
-								on:clearMessages={handleClearAiChat}
-							/>
-						</div>
-					{/if}
+							on:click={handlePush}
+							disabled={isPushing || !currentRepoName}
+							class="w-full bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 px-4 rounded text-sm transition-colors"
+						>
+							{#if isPushing}
+								<div class="flex items-center justify-center space-x-2">
+									<div class="loading-spinner w-4 h-4"></div>
+									<span>Pushing...</span>
+								</div>
+							{:else}
+								Push to Remote
+							{/if}
+						</button>
+					</div>
 				</div>
-			{/if}
 
-
-			<!-- Resize Handle between Editor and PDF -->
-			{#if layoutMode === 'both'}
+				<!-- Sidebar Resize Handle -->
 				<button
 					role="separator"
-					aria-label="Resize editor and PDF panels"
-					class="w-1 bg-gray-600 hover:bg-blue-500 cursor-col-resize transition-colors relative border-0 p-0"
-					style="transform: translateZ(0); will-change: background-color;"
-					on:mousedown={(e) => startResize('editor-pdf', e)}
+					aria-label="Resize file tree panel"
+					class="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 bg-transparent transition-colors border-0 p-0"
+					on:mousedown={(e) => startResize('filetree', e)}
 					on:keydown={(e) => {
 						if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
 							e.preventDefault();
@@ -1150,20 +1398,132 @@
 						}
 					}}
 				></button>
-			{/if}
+			</aside>
 
-			<!-- PDF Preview -->
-			{#if layoutMode === 'pdf' || layoutMode === 'both'}
-				<div
-					class="flex-1 border-l border-gray-700"
-					style={layoutMode === 'both'
-						? `width: ${100 - editorWidth}%; transform: translateZ(0); will-change: width;`
-						: 'transform: translateZ(0);'}
-				>
-					<PdfPreview {pdfUrl} isLoading={isCompiling} error={compileError} />
-				</div>
-			{/if}
+			<!-- Main Content Area (Editor + PDF) -->
+			<div class="flex-1 flex main-content-area" style="contain: layout style;">
+				<!-- Editor -->
+				{#if layoutMode === 'editor' || layoutMode === 'both'}
+					<div
+						class="flex flex-col {layoutMode === 'both' ? '' : 'flex-1'}"
+						style={layoutMode === 'both'
+							? `width: ${editorWidth}%; transform: translateZ(0); will-change: width;`
+							: 'transform: translateZ(0);'}
+					>
+						{#if currentFilePath}
+							<div
+								class="bg-dark-700 px-4 py-2 border-b border-gray-600 text-sm text-gray-300 flex items-center justify-between"
+							>
+								<span>Editing: {getFileNameFromPath(currentFilePath)}</span>
+								<span class="text-xs text-gray-500">Auto-save enabled</span>
+							</div>
+						{/if}
+
+						<div class="flex-1">
+							<div bind:this={editorContainer} class="w-full h-full"></div>
+						</div>
+
+						{#if compileError}
+							<div class="bg-red-500/10 border-t border-red-500/20 p-4 text-red-300">
+								<div class="flex items-start space-x-2">
+									<svg class="w-5 h-5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+										<path
+											fill-rule="evenodd"
+											d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
+										/>
+									</svg>
+									<div>
+										<p class="font-medium">Compilation Error</p>
+										<p class="text-sm text-red-200 mt-1">{compileError}</p>
+									</div>
+								</div>
+							</div>
+						{/if}
+
+
+					</div>
+				{/if}
+
+				<!-- Resize Handle between Editor and PDF -->
+				{#if layoutMode === 'both'}
+					<button
+						role="separator"
+						aria-label="Resize editor and PDF panels"
+						class="w-1 bg-gray-600 hover:bg-blue-500 cursor-col-resize transition-colors relative border-0 p-0"
+						style="transform: translateZ(0); will-change: background-color;"
+						on:mousedown={(e) => startResize('editor-pdf', e)}
+						on:keydown={(e) => {
+							if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+								e.preventDefault();
+								// Keyboard resize logic can be added here
+							}
+						}}
+					></button>
+				{/if}
+
+				<!-- PDF Preview -->
+				{#if layoutMode === 'pdf' || layoutMode === 'both'}
+					<div
+						class="flex flex-col border-l border-gray-700 {layoutMode === 'both' ? '' : 'flex-1'}"
+						style={layoutMode === 'both'
+							? `width: ${100 - editorWidth}%; transform: translateZ(0); will-change: width;`
+							: 'transform: translateZ(0);'}
+					>
+						<div
+							class="relative"
+							style="flex: {showAiChat ? '1 1 auto' : '1 1 0'}; min-height: {showAiChat
+								? '200px'
+								: '0'};"
+						>
+							<PdfPreview {pdfUrl} isLoading={isCompiling} error={compileError} />
+						</div>
+
+						<!-- AI Chat Panel Resize Handle -->
+						{#if showAiChat && (layoutMode === 'pdf' || layoutMode === 'both')}
+							<button
+								role="separator"
+								aria-label="Resize AI chat panel"
+								class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors border-0 p-0"
+								on:mousedown={(e) => startResize('ai-chat', e)}
+								on:keydown={(e) => {
+									if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+										e.preventDefault();
+										// Keyboard resize logic can be added here
+									}
+								}}
+							></button>
+						{/if}
+
+						<!-- AI Chat Panel (now in PDF column) -->
+						{#if showAiChat && (layoutMode === 'pdf' || layoutMode === 'both')}
+							<div style="height: {aiChatHeight}px; flex-shrink: 0;">
+								<AiChatPanel
+									isVisible={true}
+									bind:height={aiChatHeight}
+									bind:messages={aiChatMessages}
+									isLoading={aiChatLoading}
+									repoName={currentRepoName || ''}
+									userId={$authStore.user?.id || 'anonymous'}
+									on:heightChange={(e) => (aiChatHeight = e.detail)}
+									on:sendMessage={handleAiChatMessage}
+									on:clearMessages={handleClearAiChat}
+									on:claudeCodeRequired={handleClaudeCodeRequired}
+								/>
+							</div>
+						{/if}
+					</div>
+				{/if}
+			</div>
 		</div>
 	</div>
 </div>
-</div>
+
+<!-- Claude Code Modal (Full Screen) -->
+<ClaudeCodeModal
+	bind:isOpen={showClaudeCodeModal}
+	authUrl={claudeAuthUrl}
+	sessionId={claudeSessionId}
+	isLoading={claudeCodeSubmitting}
+	on:submit={handleClaudeCodeSubmit}
+	on:cancel={handleClaudeCodeCancel}
+/>

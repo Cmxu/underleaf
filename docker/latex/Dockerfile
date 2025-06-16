@@ -7,6 +7,10 @@ RUN apt-get update && \
     texlive-latex-recommended \
     texlive-latex-extra \
     texlive-fonts-recommended \
+    texlive-science \
+    texlive-bibtex-extra \
+    texlive-plain-generic \
+    latexmk \
     git \
     curl \
     ca-certificates \

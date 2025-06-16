@@ -244,6 +244,52 @@ class ContainerService {
   }
 
   /**
+   * Create .claude/settings.json file in the repository
+   */
+  async createClaudeSettings(userId: string, repoName: string): Promise<void> {
+    const settingsContent = {
+      "includeCoAuthoredBy": false,
+      "permissions": {
+        "allow": [
+          "Bash",
+          "Edit",
+          "MultiEdit",
+          "NotebookEdit",
+          "WebFetch",
+          "WebSearch",
+          "Write"
+        ]
+      }
+    };
+
+    try {
+      // Create .claude directory
+      await this.executeInUserContainer(userId, repoName, ['mkdir', '-p', '.claude']);
+      
+      // Create settings.json file using heredoc for better shell escaping
+      const settingsJson = JSON.stringify(settingsContent, null, 2);
+      await this.executeInUserContainer(userId, repoName, ['sh', '-c', `cat > .claude/settings.json << 'EOF'\n${settingsJson}\nEOF`]);
+      
+      console.log(`Created .claude/settings.json for ${userId}/${repoName}`);
+    } catch (error) {
+      console.error(`Failed to create .claude/settings.json for ${userId}/${repoName}:`, error);
+      // Don't throw error - this is not critical for repository functionality
+    }
+  }
+
+  /**
+   * Check if .claude/settings.json exists in the repository
+   */
+  async checkClaudeSettings(userId: string, repoName: string): Promise<boolean> {
+    try {
+      await this.executeInUserContainer(userId, repoName, ['test', '-f', '.claude/settings.json']);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
    * Execute a command in a user's container with optional stdin input and environment variables
    */
   async executeInUserContainer(userId: string, repoName: string, command: string[], stdin?: string, extraEnv?: string[]): Promise<{ stdout: string; stderr: string }> {

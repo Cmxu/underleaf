@@ -1,27 +1,23 @@
 import express from 'express';
 import path from 'path';
-import fs from 'fs-extra';
-// import simpleGit from 'simple-git'; // Now using containerized Git operations
+import Docker from 'dockerode';
 import type { 
   CloneRepoRequest, 
   CompileRepoRequest, 
   GitCommitRequest, 
   GitPushRequest,
-  CreateFileRequest,
-  CreateFolderRequest,
-  DeleteFileRequest,
-  RenameFileRequest,
   ClaudeAiRequest,
   ContainerStatsResponse
 } from './types/api';
 import { containerService } from './services/containerService';
 
+const docker = new Docker();
+
 const app = express();
 const port = process.env.PORT || 3001;
-// Legacy: Keep for old file-based endpoints (deprecated)
-const REPO_BASE_PATH = process.env.REPO_BASE_PATH || path.join(__dirname, '..', '..', 'repos');
 
 app.use(express.json());
+
 
 // CORS middleware for development
 app.use((req, res, next) => {
@@ -81,7 +77,6 @@ app.post('/api/clone', async (req, res) => {
     }
     
     const repoName = path.basename(normalizedRepoUrl, '.git');
-    console.log(`Cloning repository ${normalizedRepoUrl} for user ${userId} into container volume`);
 
     try {
       // Check if repository volume already exists
@@ -89,7 +84,6 @@ app.post('/api/clone', async (req, res) => {
       
       if (volumeInfo) {
         // Repository already exists, try to update it
-        console.log(`Repository ${repoName} already exists, pulling latest changes`);
         try {
           // Setup credentials if provided
           if (credentials && credentials.username && normalizedRepoUrl.startsWith('https://')) {
@@ -144,6 +138,10 @@ esac`;
           
           const pullCommand = ['git', 'pull'];
           await containerService.executeInUserContainer(userId, repoName, pullCommand);
+          
+          // Create .claude/settings.json in the repository
+          await containerService.createClaudeSettings(userId, repoName);
+          
           return res.json({ 
             message: 'Repository updated', 
             repoName, 
@@ -159,7 +157,6 @@ esac`;
         }
       } else {
         // Clone repository into a new volume via container
-        console.log(`Cloning new repository ${repoName} into volume`);
         
         // First, get or create the user container (this also creates the volume)
         await containerService.getOrCreateUserContainer(userId, repoName);
@@ -168,7 +165,6 @@ esac`;
         let cloneCommand: string[];
         
         if (credentials && credentials.username && normalizedRepoUrl.startsWith('https://')) {
-          console.log('Setting up Git authentication with credentials');
           
           // For Overleaf, use "git" as username and token as password
           // For other services, use username + password/token
@@ -219,7 +215,6 @@ esac`;
               'git', 'config', '--global', 'credential.modalprompt', 'false'
             ]);
             
-            console.log('Global Git credential helper configured');
           } catch (credError) {
             console.error('Failed to setup Git credentials:', credError);
             throw new Error('Failed to setup Git authentication');
@@ -228,16 +223,13 @@ esac`;
         
         // Build git clone command with environment variables to prevent prompts
         cloneCommand = ['git', 'clone', normalizedRepoUrl, '.'];
-        console.log(`Executing git clone command: ${cloneCommand.join(' ')}`);
         
         // Clone the repository inside the container
         try {
-          const cloneResult = await containerService.executeInUserContainer(userId, repoName, cloneCommand);
-          console.log('Git clone completed successfully');
-          console.log('Clone stdout:', cloneResult.stdout);
-          if (cloneResult.stderr) {
-            console.log('Clone stderr:', cloneResult.stderr);
-          }
+          await containerService.executeInUserContainer(userId, repoName, cloneCommand);
+          
+          // Create .claude/settings.json in the repository
+          await containerService.createClaudeSettings(userId, repoName);
         } catch (cloneError) {
           console.error('Git clone failed:', cloneError);
           const errorMessage = cloneError instanceof Error ? cloneError.message : 'Unknown error';
@@ -284,7 +276,6 @@ app.post('/api/containers/:userId/:repoName/ensure', async (req, res) => {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    console.log(`Ensuring container is running for user ${userId} with repo ${repoName}`);
     
     try {
       // This will create or start the user's container
@@ -319,7 +310,6 @@ app.get('/api/files/:userId/:repoName', async (req, res) => {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    console.log(`Getting file tree for ${repoName} via container for user ${userId}`);
     
     try {
       // Ensure user's container is running
@@ -334,7 +324,6 @@ app.get('/api/files/:userId/:repoName', async (req, res) => {
         );
         
         if (testOutput.trim() === 'empty') {
-          console.log(`Repository ${repoName} container exists but directory is empty - may still be cloning`);
           return res.status(404).json({ error: 'Repository is still being prepared. Please wait a moment and try again.' });
         }
       } catch (testError) {
@@ -352,12 +341,10 @@ app.get('/api/files/:userId/:repoName', async (req, res) => {
       const paths = stdout.trim().split('\n').filter(p => p.trim() !== '' && p !== '.');
       
       if (paths.length === 0) {
-        console.log(`Repository ${repoName} found but appears to be empty`);
         return res.json({ tree: [] });
       }
       
       const fileTree = buildFileTreeFromPaths(paths);
-      console.log(`File tree loaded for ${repoName}: ${paths.length} items found`);
       
       return res.json({ tree: fileTree });
       
@@ -457,12 +444,12 @@ app.put('/api/files/:userId/:repoName/content', async (req, res) => {
         );
       }
       
-      // Write file content via container using echo
+      // Write file content via container using printf to avoid escape sequence interpretation
       const escapedContent = content.replace(/'/g, "'\"'\"'");
       await containerService.executeInUserContainer(
         userId, 
         repoName, 
-        ['sh', '-c', `echo '${escapedContent}' > "${filePath}"`]
+        ['sh', '-c', `printf '%s' '${escapedContent}' > "${filePath}"`]
       );
       
       return res.json({ message: 'File saved successfully' });
@@ -478,170 +465,173 @@ app.put('/api/files/:userId/:repoName/content', async (req, res) => {
   }
 });
 
-// Create new file
-app.post('/api/files/:userId/:repoName/create-file', async (req, res) => {
+// Serve PDF files (allowing PDFs located in sub-directories as well)
+// We use a wildcard parameter so everything after /pdf/ is treated as the filename/path.
+app.get('/api/files/:userId/:repoName/pdf/*', async (req, res) => {
   try {
     const { userId, repoName } = req.params;
-    const { filePath, content = '' } = req.body as CreateFileRequest;
+    // Express stores the wildcard match in req.params[0]
+    const filename = (req.params as any)[0] as string;
     
-    if (!filePath) {
-      return res.status(400).json({ error: 'filePath is required' });
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
+      return res.status(404).json({ error: 'Repository not found' });
     }
     
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    const fullFilePath = path.join(repoPath, filePath);
-    
-    // Security check: ensure the file is within the repository
-    if (!fullFilePath.startsWith(repoPath)) {
+    // Security check: allow sub-paths but block directory traversal or absolute paths
+    // 1. Must end with .pdf  2. Must not contain ".."  3. Must not start with a slash
+    if (!filename.endsWith('.pdf') || filename.includes('..') || filename.startsWith('/')) {
       return res.status(403).json({ error: 'Access denied' });
     }
     
-    // Check if file already exists
-    if (await fs.pathExists(fullFilePath)) {
-      return res.status(409).json({ error: 'File already exists' });
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      // Check if PDF file exists
+      try {
+        await containerService.executeInUserContainer(userId, repoName, ['test', '-f', filename]);
+      } catch {
+        return res.status(404).json({ error: 'PDF file not found' });
+      }
+      
+      // Get PDF file size
+      const { stdout: sizeOutput } = await containerService.executeInUserContainer(
+        userId, 
+        repoName, 
+        ['stat', '-c', '%s', filename]
+      );
+      
+      const fileSize = parseInt(sizeOutput.trim()) || 0;
+      
+      if (fileSize === 0) {
+        return res.status(404).json({ error: 'PDF file is empty' });
+      }
+      
+      // Verify it's actually a PDF file by reading the header
+      const { stdout: headerCheck } = await containerService.executeInUserContainer(
+        userId, 
+        repoName, 
+        ['head', '-c', '4', filename]
+      );
+      
+      if (!headerCheck.startsWith('%PDF')) {
+        return res.status(400).json({ error: 'File is not a valid PDF' });
+      }
+      
+      // Set appropriate headers for PDF
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Length', fileSize.toString());
+      // Use only the base name for the suggested download filename
+      res.setHeader('Content-Disposition', `inline; filename="${path.basename(filename)}"`);
+      // NOTE: We deliberately omit the "Accept-Ranges" header here because
+      // the server does *not* implement HTTP range requests. Advertising
+      // range support without actually honouring Range headers confuses
+      // pdf.js and results in an empty-document (0 pages) rendering in the
+      // viewer.
+      res.setHeader('Cache-Control', 'no-cache');
+      
+            // Use Docker's native file extraction API for reliability
+      const container = await containerService.getOrCreateUserContainer(userId, repoName);
+      const dockerContainer = docker.getContainer(container.containerId);
+      
+      // Get file as tar stream from container
+      const tarStream = await dockerContainer.getArchive({
+        path: `/workdir/${filename}`
+      });
+      
+      // Extract PDF from tar stream and send directly to response
+      const tar = require('tar-stream');
+      const extract = tar.extract();
+      
+      let pdfBuffer = Buffer.alloc(0);
+      let pdfFound = false;
+      
+      extract.on('entry', (header: any, stream: any, next: any) => {
+        if (header.name === filename || header.name.endsWith(filename)) {
+          pdfFound = true;
+          console.log(`Extracting PDF: ${header.name}, size: ${header.size}`);
+          
+          const chunks: Buffer[] = [];
+          stream.on('data', (chunk: Buffer) => {
+            chunks.push(chunk);
+          });
+          
+          stream.on('end', () => {
+            pdfBuffer = Buffer.concat(chunks);
+            
+            // Verify buffer size matches the stat size we got earlier
+            if (pdfBuffer.length !== fileSize) {
+              console.warn(`Size mismatch: expected ${fileSize}, got ${pdfBuffer.length}`);
+              // Don't fail on minor size differences, just log warning
+            }
+            
+            // Final verification - check PDF header
+            if (!pdfBuffer.toString('ascii', 0, 4).startsWith('%PDF')) {
+              return res.status(500).json({ error: 'Invalid PDF data extracted from container' });
+            }
+            
+            // Send the PDF buffer
+            res.send(pdfBuffer);
+            next();
+          });
+          
+          stream.on('error', (streamError: Error) => {
+            console.error('PDF stream error:', streamError);
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Error reading PDF from container' });
+            }
+            next();
+          });
+        } else {
+          stream.on('end', next);
+          stream.resume(); // Skip other files
+        }
+      });
+      
+      extract.on('finish', () => {
+        if (!pdfFound && !res.headersSent) {
+          return res.status(404).json({ error: 'PDF file not found in container archive' });
+        }
+      });
+      
+      extract.on('error', (extractError: Error) => {
+        console.error('PDF extraction error:', extractError);
+        if (!res.headersSent) {
+          return res.status(500).json({ error: 'Failed to extract PDF from container archive' });
+        }
+      });
+      
+      tarStream.pipe(extract);
+      
+    } catch (containerError) {
+      console.error('Container PDF serve error:', containerError);
+      const errorMessage = containerError instanceof Error ? containerError.message : 'Unknown error';
+      
+      // Provide more specific error information for debugging
+      let debugInfo = '';
+      if (errorMessage.includes('hexdump') || errorMessage.includes('xxd') || errorMessage.includes('od')) {
+        debugInfo = ' (Binary data extraction tool not available in container)';
+      } else if (errorMessage.includes('No such file')) {
+        debugInfo = ' (PDF file or temp file not found)';
+      } else if (errorMessage.includes('Permission denied')) {
+        debugInfo = ' (File permission issue)';
+      }
+      
+      return res.status(500).json({ 
+        error: 'Failed to serve PDF from container', 
+        details: errorMessage + debugInfo,
+        filename: filename 
+      });
     }
     
-    await fs.ensureDir(path.dirname(fullFilePath));
-    await fs.writeFile(fullFilePath, content, 'utf-8');
-    
-    return res.json({ message: 'File created successfully' });
-  } catch (err) {
-    console.error('File create error:', err);
-    return res.status(500).json({ error: 'Failed to create file' });
-  }
-});
-
-// Create new folder
-app.post('/api/files/:userId/:repoName/create-folder', async (req, res) => {
-  try {
-    const { userId, repoName } = req.params;
-    const { folderPath } = req.body as CreateFolderRequest;
-    
-    if (!folderPath) {
-      return res.status(400).json({ error: 'folderPath is required' });
-    }
-    
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    const fullFolderPath = path.join(repoPath, folderPath);
-    
-    // Security check: ensure the folder is within the repository
-    if (!fullFolderPath.startsWith(repoPath)) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    
-    // Check if folder already exists
-    if (await fs.pathExists(fullFolderPath)) {
-      return res.status(409).json({ error: 'Folder already exists' });
-    }
-    
-    await fs.ensureDir(fullFolderPath);
-    
-    return res.json({ message: 'Folder created successfully' });
-  } catch (err) {
-    console.error('Folder create error:', err);
-    return res.status(500).json({ error: 'Failed to create folder' });
-  }
-});
-
-// Delete file or folder
-app.delete('/api/files/:userId/:repoName/delete', async (req, res) => {
-  try {
-    const { userId, repoName } = req.params;
-    const { filePath } = req.body as DeleteFileRequest;
-    
-    if (!filePath) {
-      return res.status(400).json({ error: 'filePath is required' });
-    }
-    
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    const fullPath = path.join(repoPath, filePath);
-    
-    // Security check: ensure the path is within the repository
-    if (!fullPath.startsWith(repoPath)) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    
-    // Check if path exists
-    if (!(await fs.pathExists(fullPath))) {
-      return res.status(404).json({ error: 'File or folder not found' });
-    }
-    
-    await fs.remove(fullPath);
-    
-    return res.json({ message: 'File or folder deleted successfully' });
-  } catch (err) {
-    console.error('Delete error:', err);
-    return res.status(500).json({ error: 'Failed to delete file or folder' });
-  }
-});
-
-// Rename/move file or folder
-app.put('/api/files/:userId/:repoName/rename', async (req, res) => {
-  try {
-    const { userId, repoName } = req.params;
-    const { oldPath, newPath } = req.body as RenameFileRequest;
-    
-    if (!oldPath || !newPath) {
-      return res.status(400).json({ error: 'oldPath and newPath are required' });
-    }
-    
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    const fullOldPath = path.join(repoPath, oldPath);
-    const fullNewPath = path.join(repoPath, newPath);
-    
-    // Security check: ensure both paths are within the repository
-    if (!fullOldPath.startsWith(repoPath) || !fullNewPath.startsWith(repoPath)) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    
-    // Check if old path exists
-    if (!(await fs.pathExists(fullOldPath))) {
-      return res.status(404).json({ error: 'File or folder not found' });
-    }
-    
-    // Check if new path already exists
-    if (await fs.pathExists(fullNewPath)) {
-      return res.status(409).json({ error: 'Destination already exists' });
-    }
-    
-    // Ensure the parent directory of the new path exists
-    await fs.ensureDir(path.dirname(fullNewPath));
-    
-    // Move the file or folder
-    await fs.move(fullOldPath, fullNewPath);
-    
-    return res.json({ message: 'File or folder renamed successfully' });
-  } catch (err) {
-    console.error('Rename error:', err);
-    return res.status(500).json({ error: 'Failed to rename file or folder' });
-  }
-});
-
-// Serve PDF files
-app.get('/api/files/:userId/:repoName/pdf/:filename', async (req, res) => {
-  try {
-    const { userId, repoName, filename } = req.params;
-    const repoPath = path.join(REPO_BASE_PATH, userId, repoName);
-    const pdfPath = path.join(repoPath, filename);
-    
-    // Security check: ensure the file is within the repository
-    if (!pdfPath.startsWith(repoPath) || !filename.endsWith('.pdf')) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-    
-    if (!(await fs.pathExists(pdfPath))) {
-      return res.status(404).json({ error: 'PDF not found' });
-    }
-    
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
-    const fileStream = fs.createReadStream(pdfPath);
-    fileStream.pipe(res);
   } catch (err) {
     console.error('PDF serve error:', err);
-    return res.status(500).json({ error: 'Failed to serve PDF' });
+    return res.status(500).json({ error: 'Failed to serve PDF file' });
   }
 });
+
 
 function buildFileTreeFromPaths(paths: string[]): any {
   const tree: any[] = [];
@@ -762,13 +752,11 @@ And inline math like $\\pi \\approx 3.14159$.
   // Always try to compile with pdflatex first since it's available
   try {
     if (await checkPdflatexAvailable()) {
-      console.log('Creating demo PDF with pdflatex');
-      await compileWithPdflatex(repoPath, texFile);
+        await compileWithPdflatex(repoPath, texFile);
     } else {
       throw new Error('pdflatex not available');
     }
   } catch (error) {
-    console.log('pdflatex failed for demo, creating minimal PDF placeholder');
     // Only as absolute last resort, create a minimal valid PDF
     const pdfPath = path.join(repoPath, texFile.replace('.tex', '.pdf'));
     const minimalPdf = Buffer.from([
@@ -810,7 +798,6 @@ app.post('/api/compile', async (req, res) => {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    console.log(`Compiling ${texFile} in container for user ${userId} with repo ${repoName}`);
     
     try {
       // Ensure user's container is running
@@ -821,7 +808,6 @@ app.post('/api/compile', async (req, res) => {
       try {
         await containerService.executeInUserContainer(userId, repoName, ['test', '-f', texFile]);
       } catch {
-        console.log(`TeX file ${texFile} not found, looking for common alternatives...`);
         
         // Look for common LaTeX main files via container
         const commonFiles = ['paper.tex', 'main.tex', 'document.tex', 'article.tex'];
@@ -838,11 +824,9 @@ app.post('/api/compile', async (req, res) => {
         }
         
         if (foundFile) {
-          console.log(`Found ${foundFile}, using it instead`);
           actualTexFile = foundFile;
         } else {
           // Create a simple LaTeX file for demo via container
-          console.log(`No LaTeX files found, creating demo file`);
           const sampleLatex = `\\documentclass{article}
 \\usepackage[utf8]{inputenc}
 \\title{Underleaf Demo}
@@ -860,15 +844,25 @@ This is a demonstration PDF showing that compilation is working.
           await containerService.executeInUserContainer(
             userId, 
             repoName, 
-            ['sh', '-c', `echo '${escapedContent}' > "${texFile}"`]
+            ['sh', '-c', `printf '%s' '${escapedContent}' > "${texFile}"`]
           );
           
           // Compile the demo file
-          await containerService.executeInUserContainer(
-            userId, 
-            repoName, 
-            ['pdflatex', '-interaction=nonstopmode', '-output-directory=.', texFile]
-          );
+          try {
+            await containerService.executeInUserContainer(
+              userId, 
+              repoName, 
+              ['latexmk', '-pdf', '-interaction=nonstopmode', '-output-directory=.', texFile]
+            );
+          } catch (latexmkError) {
+            // Fall back to pdflatex if latexmk is not available
+            console.log('latexmk not available for demo, using pdflatex');
+            await containerService.executeInUserContainer(
+              userId, 
+              repoName, 
+              ['pdflatex', '-interaction=nonstopmode', '-output-directory=.', texFile]
+            );
+          }
           
           const pdfFile = texFile.replace('.tex', '.pdf');
           return res.json({ 
@@ -880,12 +874,77 @@ This is a demonstration PDF showing that compilation is working.
       }
       
       // Use containerized LaTeX compilation for each user
-      console.log(`Using user container for LaTeX compilation: ${userId}/${repoName}`);
-      const { stdout, stderr } = await containerService.executeInUserContainer(
-        userId, 
-        repoName, 
-        ['pdflatex', '-interaction=nonstopmode', '-output-directory=.', actualTexFile]
-      );
+      let stdout = '';
+      let stderr = '';
+      
+      try {
+        // Try latexmk first (preferred for handling bibliography and multiple passes)
+        const result = await containerService.executeInUserContainer(
+          userId, 
+          repoName, 
+          ['latexmk', '-pdf', '-interaction=nonstopmode', '-output-directory=.', actualTexFile]
+        );
+        stdout = result.stdout;
+        stderr = result.stderr;
+      } catch (latexmkError) {
+        // If latexmk is not available, fall back to manual pdflatex with bibliography handling
+        console.log('latexmk not available, falling back to pdflatex with manual bibliography handling');
+        
+        // First pass: pdflatex
+        let result = await containerService.executeInUserContainer(
+          userId, 
+          repoName, 
+          ['pdflatex', '-interaction=nonstopmode', '-output-directory=.', actualTexFile]
+        );
+        stdout += result.stdout;
+        stderr += result.stderr;
+        
+        // Check if we have bibliography files (.bib) and run bibtex if needed
+        try {
+          const bibFiles = await containerService.executeInUserContainer(
+            userId, 
+            repoName, 
+            ['find', '.', '-name', '*.bib', '-type', 'f']
+          );
+          
+          if (bibFiles.stdout.trim()) {
+            console.log('Bibliography files found, running bibtex');
+            // Run bibtex on the aux file
+            const auxFile = actualTexFile.replace('.tex', '.aux');
+            try {
+              const bibtexResult = await containerService.executeInUserContainer(
+                userId, 
+                repoName, 
+                ['bibtex', auxFile]
+              );
+              stdout += bibtexResult.stdout;
+              stderr += bibtexResult.stderr;
+              
+              // Second pass: pdflatex (to incorporate bibliography)
+              result = await containerService.executeInUserContainer(
+                userId, 
+                repoName, 
+                ['pdflatex', '-interaction=nonstopmode', '-output-directory=.', actualTexFile]
+              );
+              stdout += result.stdout;
+              stderr += result.stderr;
+              
+              // Third pass: pdflatex (to resolve all references)
+              result = await containerService.executeInUserContainer(
+                userId, 
+                repoName, 
+                ['pdflatex', '-interaction=nonstopmode', '-output-directory=.', actualTexFile]
+              );
+              stdout += result.stdout;
+              stderr += result.stderr;
+            } catch (bibtexError) {
+              console.log('bibtex failed, continuing with single pdflatex pass');
+            }
+          }
+        } catch (findError) {
+          console.log('Could not check for bibliography files, continuing with single pass');
+        }
+      }
       
       if (stderr && !stdout) {
         console.warn('LaTeX compilation warnings/errors:', stderr);
@@ -897,15 +956,45 @@ This is a demonstration PDF showing that compilation is working.
       try {
         await containerService.executeInUserContainer(userId, repoName, ['test', '-f', pdfFile]);
         
+        // Add a sync delay to ensure the PDF file is fully written to disk
+        // LaTeX compilation can take time to flush buffers properly
+        console.log('PDF file exists, waiting for filesystem sync...');
+        await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5 second delay
+        
+        // Sync filesystem to ensure all data is written
+        try {
+          await containerService.executeInUserContainer(userId, repoName, ['sync']);
+        } catch (syncError) {
+          console.warn('sync command not available, using fsync fallback:', syncError);
+          // Alternative: just add a small delay for buffer flushing
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
         // Get file size via container
         const { stdout: sizeOutput } = await containerService.executeInUserContainer(
           userId, 
           repoName, 
           ['stat', '-c', '%s', pdfFile]
         );
-        const size = parseInt(sizeOutput.trim()) || 0;
+        const fileSize = parseInt(sizeOutput.trim()) || 0;
         
-        console.log(`PDF created successfully: ${pdfFile} (${size} bytes)`);
+        // Reject empty or corrupt output early so the frontend shows a clear error
+        if (fileSize === 0) {
+          throw new Error('PDF file is empty – LaTeX compilation probably failed');
+        }
+        
+        // Verify the PDF header to make sure we return a *real* PDF and not a
+        // zero-byte placeholder produced by a failed compilation.
+        const { stdout: headerCheck } = await containerService.executeInUserContainer(
+          userId, 
+          repoName, 
+          ['head', '-c', '4', pdfFile]
+        );
+        
+        if (!headerCheck.startsWith('%PDF')) {
+          throw new Error('Invalid PDF generated – the file does not start with %PDF');
+        }
+        
         return res.json({ 
           message: 'Compilation finished successfully',
           pdfFile: pdfFile,
@@ -940,7 +1029,6 @@ app.get('/api/git/:userId/:repoName/status', async (req, res) => {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    console.log(`Getting git status for ${repoName} via container for user ${userId}`);
     
     try {
       // Ensure user's container is running
@@ -1031,7 +1119,6 @@ app.post('/api/git/:userId/:repoName/commit', async (req, res) => {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    console.log(`Committing changes for ${repoName} via container for user ${userId}`);
     
     try {
       // Ensure user's container is running
@@ -1096,7 +1183,6 @@ app.post('/api/git/:userId/:repoName/push', async (req, res) => {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    console.log(`Pushing changes for ${repoName} via container for user ${userId}`);
     
     try {
       // Ensure user's container is running
@@ -1145,7 +1231,6 @@ app.post('/api/git/:userId/:repoName/fetch', async (req, res) => {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    console.log(`Fetching changes for ${repoName} via container for user ${userId}`);
     
     try {
       // Ensure user's container is running
@@ -1185,7 +1270,6 @@ app.post('/api/git/:userId/:repoName/pull', async (req, res) => {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    console.log(`Pulling changes for ${repoName} via container for user ${userId}`);
     
     try {
       // Ensure user's container is running
@@ -1275,7 +1359,792 @@ app.get('/api/claude/setup', async (req, res) => {
   }
 });
 
-// Claude AI endpoint
+// Claude AI interactive setup endpoint
+app.post('/api/claude/interactive-setup', async (req, res) => {
+  try {
+    const { userId = 'anonymous', repoName } = req.body;
+    
+    if (!repoName) {
+      return res.status(400).json({ error: 'repoName is required' });
+    }
+
+    
+    try {
+      // Re-use the already running user container instead of launching a new one
+      const userContainerInfo = await containerService.getOrCreateUserContainer(userId, repoName);
+      const tempContainerName = userContainerInfo.containerName; // keep the same var name for minimal downstream edits
+      const tempContainer = docker.getContainer(userContainerInfo.containerId);
+
+      // Prepare the expect script content
+      const expectScript = `#!/usr/bin/expect -f
+# claude_autostart.exp
+#
+# Launches \`claude\`, chooses the default text style,
+# then chooses the default login method by pressing <Enter> twice.
+# Uses Ctrl-Z to background the process after getting the URL.
+
+set timeout 60           ;# 60 second timeout
+
+# 1. Start the programme
+spawn claude
+
+# 2. Wait for the "text style" prompt and accept the default
+expect {
+    -re {Choose the text style that looks best with your terminal:} {
+        send "\\r"
+    }
+    -re {text style.*:} {
+        send "\\r"
+    }
+    timeout {
+        puts "Timeout waiting for text style prompt"
+        exit 1
+    }
+}
+
+# 3. Wait for the "login method" prompt and accept the default
+expect {
+    -re {Select login method:} {
+        send "\\r"
+    }
+    -re {login method.*:} {
+        send "\\r"
+    }
+    -re {authentication.*:} {
+        send "\\r"
+    }
+    timeout {
+        puts "Timeout waiting for login method prompt"
+        exit 1
+    }
+}
+
+# 4. Wait for and capture the authentication URL, then background the process
+expect {
+    -re {Browser didn't open\\? Use the url below to sign in: (https?://[^\\s\\r\\n\\x1b\\x00-\\x1f]+)} {
+        puts "AUTH_URL_FOUND: $expect_out(1,string)"
+        puts "DEBUG: Found browser message with URL: $expect_out(1,string)"
+        puts "WAITING_FOR_CODE"
+        
+        # Send Ctrl-Z to background the claude process
+        # puts "DEBUG: Sending Ctrl-Z to background claude process"
+        # send "\\032"
+        
+        # Wait a moment for the process to be backgrounded
+        after 1000
+        
+        # Now we wait for the verification code file
+        puts "DEBUG: Claude process backgrounded, waiting for verification code file"
+    }
+    -re {Use the url below to sign in: (https?://[^\\s\\r\\n\\x1b\\x00-\\x1f]+)} {
+        puts "AUTH_URL_FOUND: $expect_out(1,string)"
+        puts "DEBUG: Found sign in URL: $expect_out(1,string)"
+        puts "WAITING_FOR_CODE"
+        
+        # Send Ctrl-Z to background the claude process
+        # puts "DEBUG: Sending Ctrl-Z to background claude process"
+        # send "\\032"
+        
+        # Wait a moment for the process to be backgrounded
+        after 1000
+        
+        # Now we wait for the verification code file
+        puts "DEBUG: Claude process backgrounded, waiting for verification code file"
+    }
+    -re {(https?://[^\\s\\r\\n\\x1b\\x00-\\x1f]+)} {
+        puts "AUTH_URL_FOUND: $expect_out(1,string)"
+        puts "DEBUG: Found standalone URL: $expect_out(1,string)"
+        puts "WAITING_FOR_CODE"
+        
+        # Send Ctrl-Z to background the claude process
+        # puts "DEBUG: Sending Ctrl-Z to background claude process"
+        # send "\\032"
+        # Wait a moment for the process to be backgrounded
+        after 1000
+        
+        # Now we wait for the verification code file
+        puts "DEBUG: Claude process backgrounded, waiting for verification code file"
+    }
+    -re {Paste code here if prompted >|Enter the verification code|verification code|Enter code|code:} {
+        puts "CODE_PROMPT_READY"
+        puts "DEBUG: Found code prompt directly, no need to background"
+        puts "WAITING_FOR_USER_INPUT"
+    }
+    -re {already.*authenticated} {
+        puts "ALREADY_AUTHENTICATED"
+        exit 0
+    }
+    -re {error|failed|invalid} {
+        puts "SETUP_ERROR"
+        exit 1
+    }
+    timeout {
+        puts "DEBUG: Timeout waiting for URL or code prompt"
+        puts "DEBUG: Buffer content: $expect_out(buffer)"
+        exit 1
+    }
+    eof {
+        puts "DEBUG: Process ended unexpectedly"
+        exit 1
+    }
+}
+
+# 5. Wait for the verification code file to appear
+set timeout 300  ;# 5 minute timeout for user to provide code
+set verification_code ""
+
+puts "DEBUG: Starting to poll for verification code file"
+puts "DEBUG: Looking for file at: /tmp/claude-comm/verification_code.txt"
+
+# Check if the mount directory exists
+if {[file exists "/tmp/claude-comm"]} {
+    puts "DEBUG: Mount directory /tmp/claude-comm exists"
+    catch {exec ls -la /tmp/claude-comm} result
+    puts "DEBUG: Directory contents: $result"
+} else {
+    puts "DEBUG: Mount directory /tmp/claude-comm does not exist!"
+}
+
+for {set i 0} {$i < 300} {incr i} {
+    # Debug output every 10 seconds
+    if {$i % 10 == 0} {
+        puts "DEBUG: Polling attempt $i/300"
+        if {[file exists "/tmp/claude-comm"]} {
+            catch {exec ls -la /tmp/claude-comm 2>/dev/null} ls_result
+            puts "DEBUG: Directory contents: $ls_result"
+        }
+    }
+    
+    # Check if file exists and try to read it
+    if {[file exists "/tmp/claude-comm/verification_code.txt"]} {
+        puts "DEBUG: Found verification_code.txt file"
+        
+        # Check if file is readable
+        if {[file readable "/tmp/claude-comm/verification_code.txt"]} {
+            puts "DEBUG: File is readable, attempting to read content"
+            
+            # Try to read the verification code from file
+            if {[catch {open "/tmp/claude-comm/verification_code.txt" r} file_handle]} {
+                puts "DEBUG: Failed to open file: $file_handle"
+                after 500
+                continue
+            }
+            
+            set verification_code [string trim [read $file_handle]]
+            close $file_handle
+            
+            puts "DEBUG: Successfully read verification code"
+            puts "DEBUG: Code length: [string length $verification_code]"
+            
+            # Delete the file to avoid reuse
+            catch {file delete "/tmp/claude-comm/verification_code.txt"}
+            
+            if {[string length $verification_code] > 0} {
+                puts "CODE_RECEIVED: $verification_code"
+                
+                # Bring claude back to foreground and submit the code
+                puts "DEBUG: Bringing claude process back to foreground"
+                #send "fg\\r"
+              
+                
+                # Now send the verification code character by character like real keystrokes
+                puts "DEBUG: Sending verification code to claude character by character"
+                
+                # Type the code like real keystrokes
+
+                foreach ch [split $verification_code ""] {
+                    send -- $ch
+                    after 50
+                }
+                send "\\r"
+                puts "CODE_SUBMITTED: $verification_code"
+                puts "DEBUG: OTP sent"
+                
+                break
+            } else {
+                puts "DEBUG: File was empty, continuing to poll"
+            }
+        } else {
+            puts "DEBUG: File exists but is not readable"
+            catch {exec chmod 666 /tmp/claude-comm/verification_code.txt}
+        }
+    }
+    
+    # Sleep for 1 second before checking again
+    after 200
+}
+
+if {$verification_code eq ""} {
+    puts "TIMEOUT_WAITING_FOR_CODE_FILE"
+    puts "DEBUG: Timeout waiting for verification code file"
+    exit 1
+}
+
+# 6. Wait for authentication completion flow after submitting the code
+set timeout 60
+
+# First, wait for "Login successful. Press Enter to continue…"
+expect {
+    -re {successful} {
+        puts "DEBUG: Login successful, pressing Enter to continue"
+        send "\\r"
+    }
+    -re {error|failed|invalid|incorrect} {
+        puts "CODE_ERROR"
+        exit 1
+    }
+    timeout {
+        puts "DEBUG: Timeout waiting for login successful message"
+        puts "DEBUG: Current buffer content:"
+        puts $expect_out(buffer)
+        exit 1
+    }
+    eof {
+        puts "DEBUG: Process ended unexpectedly after code submission"
+        exit 1
+    }
+}
+
+# Wait for "Security notes:" then press enter
+expect {
+    -re {Security notes} {
+        puts "DEBUG: Found Security notes prompt, pressing Enter"
+        send "\\r"
+    }
+    timeout {
+        puts "DEBUG: Timeout waiting for Security notes"
+        puts "DEBUG: Current buffer content:"
+        puts $expect_out(buffer)
+        exit 1
+    }
+    eof {
+        puts "DEBUG: Process ended at Security notes"
+        exit 1
+    }
+}
+
+# Wait for "Do you trust the files in this folder?" then press enter
+expect {
+    -re {Do you trust.*files.*folder} {
+        puts "DEBUG: Found trust files prompt, pressing Enter"
+        send "\\r"
+    }
+    -re {trust.*files} {
+        puts "DEBUG: Found trust files prompt (alternate pattern), pressing Enter"
+        send "\\r"
+    }
+    timeout {
+        puts "DEBUG: Timeout waiting for trust files prompt"
+        puts "DEBUG: Current buffer content:"
+        puts $expect_out(buffer)
+        exit 1
+    }
+    eof {
+        puts "DEBUG: Process ended at trust files prompt"
+        exit 1
+    }
+}
+
+# Finally, send Ctrl-C twice to finish
+puts "DEBUG: Authentication flow complete, sending Ctrl-C twice"
+send "\\003"
+after 500
+send "\\003"
+after 1000
+
+puts "AUTHENTICATION_SUCCESS"
+puts "DEBUG: Claude authentication setup completed successfully"
+exit 0
+`;
+
+      console.log(`Using existing container ${tempContainerName} for Claude setup`);
+
+      // Ensure required tooling and directories exist inside the container
+      await containerService.executeInUserContainer(userId, repoName, [
+        'sh', '-c', 'command -v expect || (apt-get update -qq && apt-get install -y -qq expect)'
+      ]);
+
+      await containerService.executeInUserContainer(userId, repoName, [
+        'mkdir', '-p', '/tmp/claude-comm'
+      ]);
+
+      await containerService.executeInUserContainer(userId, repoName, [
+        'chmod', '777', '/tmp/claude-comm'
+      ]);
+
+      // Copy the expect script into the container
+      await containerService.executeInUserContainer(userId, repoName, [
+        'sh', '-c', `cat > /tmp/claude_setup.exp << 'EOF'\n${expectScript.replace(/'/g, "'\\''")}\nEOF`
+      ]);
+      await containerService.executeInUserContainer(userId, repoName, [
+        'chmod', '+x', '/tmp/claude_setup.exp'
+      ]);
+
+      // Start the expect script and get a live stream to it
+      const execInstance = await tempContainer.exec({
+        Cmd: ['/tmp/claude_setup.exp'],
+        AttachStdout: true,
+        AttachStderr: true,
+        AttachStdin: true,
+        Tty: true
+      });
+
+      const containerStream = await execInstance.start({ hijack: true, stdin: true });
+
+      // tempCommDir is purely internal now
+      const tempCommDir = '/tmp/claude-comm';
+
+      let outputBuffer = '';
+      let authUrl = '';
+      let responseAlreadySent = false;
+
+      // Timeout to avoid hanging forever waiting for user interaction
+      const timeout = setTimeout(() => {
+        if (!responseAlreadySent) {
+          responseAlreadySent = true;
+          res.status(500).json({ error: 'Claude setup timeout after 5 minutes' });
+        }
+      }, 300000); // 5-minute timeout for user interaction
+
+      // Attach to the container for real-time interaction
+      containerStream.on('data', (chunk) => {
+        const data = chunk.toString();
+        outputBuffer += data;
+        
+        console.log('=== Claude setup output ===');
+        console.log(data);
+        console.log('=== End Claude setup output ===');
+        
+        // Look for specific markers in the output
+        if (data.includes('AUTH_URL_FOUND:')) {
+          console.log('🔍 AUTH_URL_FOUND marker detected!');
+          const urlMatch = data.match(/AUTH_URL_FOUND:\s*(https?:\/\/[^\s\r\n]+)/);
+          if (urlMatch) {
+            authUrl = urlMatch[1].trim();
+            console.log('🔗 CLAUDE AUTH URL FOUND:', authUrl);
+            console.log('🔗 URL LENGTH:', authUrl.length);
+            console.log('🔗 RAW DATA CONTAINING URL:', JSON.stringify(data));
+            
+            // Respond immediately when we have the URL - don't wait for WAITING_FOR_CODE
+            if (!responseAlreadySent) {
+              console.log('✅ URL found, responding to frontend immediately');
+              respondWithUrl();
+            }
+          } else {
+            console.log('❌ AUTH_URL_FOUND marker found but regex failed to extract URL');
+            console.log('🔍 Full data for debugging:', JSON.stringify(data));
+          }
+        }
+        
+        // Also check if there's a URL anywhere in the output (fallback)
+        if (!authUrl && !responseAlreadySent) {
+          const urlMatch = data.match(/https?:\/\/[^\s\r\n\x1b\x00-\x1f]+/);
+          if (urlMatch) {
+            authUrl = urlMatch[0].trim();
+            if (!responseAlreadySent) {
+              respondWithUrl();
+            }
+          }
+        }
+        
+        // Also check for the old flow - if we see WAITING_FOR_CODE with a URL
+        if (data.includes('WAITING_FOR_CODE') && authUrl && !responseAlreadySent) {
+          respondWithUrl();
+        }
+        
+        function respondWithUrl() {
+          responseAlreadySent = true;
+          clearTimeout(timeout);
+          
+          // Store container info for later code submission with multiple keys for reliability
+          (global as any).claudeContainers = (global as any).claudeContainers || {};
+          const containerInfo = {
+            container: tempContainer,
+            stream: containerStream,
+            containerName: tempContainerName,
+            tempCommDir,
+            userId,
+            repoName,
+            authUrl,
+            createdAt: new Date().toISOString()
+          };
+          
+          // Store with multiple key formats to ensure retrieval works
+          const sessionId = `${userId}-${repoName}`;
+          (global as any).claudeContainers[sessionId] = containerInfo;
+          (global as any).claudeContainers[tempContainerName] = containerInfo;
+          
+          
+          // Add a verification that the container info is actually stored
+          setTimeout(() => {
+            const storedInfo = (global as any).claudeContainers[sessionId];
+            if (storedInfo) {
+            }
+          }, 1000);
+          
+          res.json({
+            message: 'Claude Pro authentication URL captured',
+            authUrl,
+            step: 'waiting_for_code',
+            instructions: [
+              '1. Click the authentication URL',
+              '2. Sign in with your Claude Pro account', 
+              '3. Copy the verification code you receive',
+              '4. Enter the code in the popup to complete setup'
+            ],
+            output: outputBuffer,
+            needsUserCode: true,
+            sessionId: `${userId}-${repoName}`
+          });
+        }
+        
+        // Handle authentication completion
+        if (data.includes('AUTHENTICATION_SUCCESS') && !responseAlreadySent) {
+          responseAlreadySent = true;
+          clearTimeout(timeout);
+          
+          // No host-side cleanup required when reusing container
+          
+          res.json({
+            message: 'Claude authentication completed successfully!',
+            step: 'completed',
+            configured: true
+          });
+        }
+        
+        if (data.includes('ALREADY_AUTHENTICATED') && !responseAlreadySent) {
+          responseAlreadySent = true;
+          clearTimeout(timeout);
+          
+          // No host-side cleanup required when reusing container
+          
+          res.json({
+            message: 'Claude CLI is already configured',
+            step: 'already_configured',
+            configured: true
+          });
+        }
+      });
+
+      // This fallback is no longer needed since we handle responses in the stream handler
+      // The container stays alive waiting for user code input
+      
+    } catch (containerError) {
+      console.error('Container claude interactive setup error:', containerError);
+      return res.status(500).json({ error: 'Failed to run Claude interactive setup in container' });
+    }
+    
+  } catch (err) {
+    console.error('Claude interactive setup endpoint error:', err);
+    return res.status(500).json({ error: 'Failed to start Claude interactive setup' });
+  }
+  });
+
+// DEBUG: Test endpoint to verify routing works
+app.post('/api/claude/test', (req, res) => {
+  res.json({ message: 'Test endpoint working', body: req.body });
+});
+
+// Claude AI code verification endpoint
+app.post('/api/claude/verify-code', async (req, res) => {
+  try {
+    const { userId = 'anonymous', repoName, verificationCode } = req.body;
+    
+    if (!repoName || !verificationCode) {
+      return res.status(400).json({ error: 'repoName and verificationCode are required' });
+    }
+
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+
+    try {
+      // Get the container for file writing
+      console.log('🔍 Looking for container for verification code submission...');
+      const writeSessionId = `${userId}-${repoName}`;
+      const writeContainerInfo = (global as any).claudeContainers?.[writeSessionId];
+      
+      let container;
+      if (writeContainerInfo && writeContainerInfo.container) {
+        console.log('✅ Using existing Claude container from session');
+        container = writeContainerInfo.container;
+      } else {
+        console.log('🔄 Getting or creating user container via container service');
+        const userContainerInfo = await containerService.getOrCreateUserContainer(userId, repoName);
+        container = docker.getContainer(userContainerInfo.containerId);
+        console.log('✅ Got container:', userContainerInfo.containerName);
+      }
+      
+      // Write the verification code to the container
+      const cleanCode = verificationCode.trim();
+      console.log('📝 Writing verification code to container:', cleanCode.length, 'characters');
+      
+      // Escape the verification code for safe shell usage
+      const escapedCode = cleanCode.replace(/'/g, "'\"'\"'");
+      
+      // Create directory and write file in separate steps for better error handling
+      try {
+        // Step 1: Create directory
+        const mkdirExec = await container.exec({
+          Cmd: ['mkdir', '-p', '/tmp/claude-comm'],
+          AttachStdout: true,
+          AttachStderr: true
+        });
+        
+        const mkdirStream = await mkdirExec.start({ hijack: true, stdin: false });
+        let mkdirOutput = '';
+        mkdirStream.on('data', (chunk: Buffer) => {
+          mkdirOutput += chunk.toString();
+        });
+        
+        await new Promise((resolve, reject) => {
+          mkdirStream.on('end', resolve);
+          mkdirStream.on('error', reject);
+        });
+        
+        console.log('📁 Directory creation output:', mkdirOutput || '(no output)');
+        
+        // Step 2: Write the verification code file
+        const writeExec = await container.exec({
+          Cmd: ['sh', '-c', `echo '${escapedCode}' > /tmp/claude-comm/verification_code.txt`],
+          AttachStdout: true,
+          AttachStderr: true
+        });
+        
+        const writeStream = await writeExec.start({ hijack: true, stdin: false });
+        let writeOutput = '';
+        writeStream.on('data', (chunk: Buffer) => {
+          writeOutput += chunk.toString();
+        });
+        
+        await new Promise((resolve, reject) => {
+          writeStream.on('end', resolve);
+          writeStream.on('error', reject);
+        });
+        
+        console.log('✍️ File write output:', writeOutput || '(no output)');
+        
+        // Step 3: Set permissions
+        const chmodExec = await container.exec({
+          Cmd: ['chmod', '666', '/tmp/claude-comm/verification_code.txt'],
+          AttachStdout: true,
+          AttachStderr: true
+        });
+        
+        const chmodStream = await chmodExec.start({ hijack: true, stdin: false });
+        let chmodOutput = '';
+        chmodStream.on('data', (chunk: Buffer) => {
+          chmodOutput += chunk.toString();
+        });
+        
+        await new Promise((resolve, reject) => {
+          chmodStream.on('end', resolve);
+          chmodStream.on('error', reject);
+        });
+        
+        console.log('🔐 Permissions set output:', chmodOutput || '(no output)');
+        
+        // Small delay to ensure file operations complete
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Step 4: Verify the file was written correctly
+        const verifyExec = await container.exec({
+          Cmd: ['cat', '/tmp/claude-comm/verification_code.txt'],
+          AttachStdout: true,
+          AttachStderr: true
+        });
+        
+        const verifyStream = await verifyExec.start({ hijack: true, stdin: false });
+        let verifyOutput = '';
+        verifyStream.on('data', (chunk: Buffer) => {
+          verifyOutput += chunk.toString();
+        });
+        
+        await new Promise((resolve, reject) => {
+          verifyStream.on('end', resolve);
+          verifyStream.on('error', reject);
+        });
+        
+        console.log('🔍 File verification - expected length:', cleanCode.length, 'actual length:', verifyOutput.trim().length);
+        console.log('🔍 File content matches:', verifyOutput.trim() === cleanCode);
+        
+        // The expect script inside the container may consume and delete the verification
+        // file almost immediately after we create it. In that case `cat` will return an
+        // empty result or "No such file" and the content check above will fail. This is
+        // perfectly fine – the presence of the file for even a split-second is enough
+        // for the script to read the code and proceed. Therefore, instead of treating a
+        // mismatch as a hard error, we only log a warning and continue waiting for the
+        // authentication success markers.
+        if (!verifyOutput.trim() || verifyOutput.trim() !== cleanCode) {
+          console.warn('⚠️  Verification file could not be validated – it was probably picked up by the expect script already. Continuing to monitor authentication…');
+        } else {
+          console.log('✅ Verification code file created successfully');
+        }
+        
+      } catch (fileError) {
+        console.error('❌ File operation failed:', fileError);
+        return res.status(500).json({ error: 'Failed to create verification code file - ' + (fileError instanceof Error ? fileError.message : 'unknown error') });
+      }
+      
+      // Monitor container stream for authentication completion
+      let responseAlreadySent = false;
+      let authTimeout: NodeJS.Timeout | null = null;
+      
+      // Cleanup function to clear all timeouts and listeners
+      const cleanup = (storedInfo?: any) => {
+        if (authTimeout) {
+          clearTimeout(authTimeout);
+          authTimeout = null;
+        }
+        if (storedInfo?.stream && streamDataHandler) {
+          storedInfo.stream.removeListener('data', streamDataHandler);
+        }
+      };
+      
+      // Single timeout for authentication process
+      authTimeout = setTimeout(() => {
+        if (!responseAlreadySent) {
+          responseAlreadySent = true;
+          cleanup();
+          res.status(500).json({ error: 'Authentication timeout - no response from Claude CLI after 90 seconds' });
+        }
+      }, 90000); // Extended to 90 seconds
+      
+      const sessionId = `${userId}-${repoName}`;
+      const storedContainerInfo = (global as any).claudeContainers?.[sessionId];
+      
+      // Declare streamDataHandler in scope for cleanup function
+      let streamDataHandler: ((data: Buffer) => void) | null = null;
+      
+      if (storedContainerInfo && storedContainerInfo.stream) {
+        streamDataHandler = (data: Buffer) => {
+          const outputText = data.toString();
+          
+          // Check for success markers
+          if ((outputText.includes('AUTHENTICATION_SUCCESS') || 
+               outputText.includes('UAUTHENTICATION_SUCCESS') || 
+               outputText.includes('authentication setup completed successfully')) && 
+              !responseAlreadySent) {
+            
+            responseAlreadySent = true;
+            cleanup(storedContainerInfo);
+            
+            res.json({
+              message: 'Claude authentication completed successfully!',
+              step: 'completed',
+              configured: true
+            });
+            return;
+          }
+          
+          // Check for error markers
+          if ((outputText.includes('SETUP_ERROR') || 
+               outputText.includes('CODE_ERROR') || 
+               outputText.includes('invalid') || 
+               outputText.includes('incorrect') || 
+               outputText.includes('failed')) && 
+              !responseAlreadySent) {
+            
+            responseAlreadySent = true;
+            cleanup(storedContainerInfo);
+            
+            res.json({
+              message: 'Invalid verification code',
+              step: 'code_error',
+              error: 'The verification code was incorrect. Please try again.'
+            });
+            return;
+          }
+        };
+        
+        // Add the listener to the existing stream
+        storedContainerInfo.stream.on('data', streamDataHandler);
+        
+      } else {
+        // Fallback to log polling if no stream is available
+        const pollInterval = 2000;
+        
+        const pollLogs = async () => {
+          if (responseAlreadySent) return;
+          
+          try {
+            const logs = await container.logs({
+              stdout: true,
+              stderr: true,
+              tail: 100,
+              since: Math.floor((Date.now() / 1000) - 120)
+            });
+            
+            const logData = logs.toString();
+            
+            if (logData.includes('AUTHENTICATION_SUCCESS') || 
+                logData.includes('UAUTHENTICATION_SUCCESS') || 
+                logData.includes('authentication setup completed successfully') ||
+                logData.includes('success') || 
+                logData.includes('authenticated') || 
+                logData.includes('complete') ||
+                logData.includes('ready')) {
+              
+              responseAlreadySent = true;
+              cleanup();
+              
+              res.json({
+                message: 'Claude authentication completed successfully!',
+                step: 'completed',
+                configured: true
+              });
+              return;
+            }
+            
+            if (logData.includes('SETUP_ERROR') || 
+                logData.includes('CODE_ERROR') || 
+                logData.includes('invalid') || 
+                logData.includes('incorrect') || 
+                logData.includes('failed')) {
+              
+              responseAlreadySent = true;
+              cleanup();
+              
+              res.json({
+                message: 'Invalid verification code',
+                step: 'code_error',
+                error: 'The verification code was incorrect. Please try again.'
+              });
+              return;
+            }
+            
+            if (!responseAlreadySent) {
+              setTimeout(pollLogs, pollInterval);
+            }
+            
+          } catch (logError) {
+            if (!responseAlreadySent) {
+              setTimeout(pollLogs, pollInterval);
+            }
+          }
+        };
+        
+        // Start polling after 1 second
+        setTimeout(pollLogs, 1000);
+      }
+      
+    } catch (containerError) {
+      console.error('❌ Container operation failed:', containerError);
+      const errorMessage = containerError instanceof Error ? containerError.message : 'Unknown container error';
+      return res.status(500).json({ error: 'Failed to write verification code to container: ' + errorMessage });
+    }
+    
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to process code verification' });
+  }
+});
+
+// Session storage for multi-turn conversations
+const claudeSessions = new Map<string, string>(); // key: userId:repoName, value: sessionId
+
+// Claude AI endpoint with streaming support
 app.post('/api/claude', async (req, res) => {
   try {
     const { userId = 'anonymous', repoName, message } = req.body as ClaudeAiRequest;
@@ -1284,38 +2153,262 @@ app.post('/api/claude', async (req, res) => {
       return res.status(400).json({ error: 'repoName and message are required' });
     }
 
+    const sessionKey = `${userId}:${repoName}`;
+    const existingSessionId = claudeSessions.get(sessionKey);
+
     // Check if repository volume exists
     const volumeInfo = containerService.getRepoVolumeInfo(repoName);
     if (!volumeInfo) {
       return res.status(404).json({ error: 'Repository not found' });
     }
     
-    console.log(`Executing Claude command in container for ${repoName} with message: "${message}"`);
-    
     try {
       // Set up environment variables for Claude CLI if API key is available
       const claudeEnv = process.env.ANTHROPIC_API_KEY ? 
         ['ANTHROPIC_API_KEY=' + process.env.ANTHROPIC_API_KEY] : [];
       
-      // Execute Claude CLI command in the user's container
-      // Using 'claude --print' for non-interactive output
-      const { stdout, stderr } = await containerService.executeInUserContainer(
-        userId,
-        repoName,
-        ['claude', '--print', '--output-format', 'text', message],
-        undefined, // no stdin
-        claudeEnv  // pass API key environment variable
-      );
-      
-      if (stderr && stderr.includes('error') && !stdout) {
-        throw new Error(stderr);
+      // First, check if Claude is authenticated to avoid triggering auth flow
+      try {
+        const { stdout: authCheck } = await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['claude', 'auth', 'whoami'],
+          undefined,
+          claudeEnv
+        );
+        
+        if (!authCheck || authCheck.includes('not authenticated') || authCheck.includes('no valid')) {
+          return res.status(401).json({ 
+            error: 'Claude CLI not authenticated. Please complete authentication first.',
+            requiresAuth: true
+          });
+        }
+      } catch (authError) {
+        return res.status(401).json({ 
+          error: 'Claude CLI not authenticated. Please complete authentication first.',
+          requiresAuth: true
+        });
       }
       
-      const response = stdout || stderr || 'No response from Claude';
+      // Set up streaming response headers
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Transfer-Encoding': 'chunked',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Content-Type'
+      });
+
+      // Get container for streaming execution
+      const userContainerInfo = await containerService.getOrCreateUserContainer(userId, repoName);
+      const container = docker.getContainer(userContainerInfo.containerId);
+
+      // Build Claude command with optional session resume
+      const claudeCmd = ['claude', '--print', '--verbose', '--output-format', 'stream-json'];
+      if (existingSessionId) {
+        claudeCmd.push('--resume', existingSessionId);
+        console.log(`🔄 Resuming Claude session: ${existingSessionId}`);
+      } else {
+        console.log('🆕 Starting new Claude session');
+      }
+      claudeCmd.push(message);
+
+      // Create exec instance for streaming Claude command
+      const execInstance = await container.exec({
+        Cmd: claudeCmd,
+        AttachStdout: true,
+        AttachStderr: true,
+        AttachStdin: false,
+        Tty: false,
+        Env: claudeEnv
+      });
+
+      const stream = await execInstance.start({ hijack: true, stdin: false });
       
-      return res.json({
-        message: 'Claude AI response received',
-        response: response.trim()
+      let buffer = '';
+      let hasStarted = false;
+      let capturedSessionId: string | null = null;
+
+      stream.on('data', (chunk) => {
+        console.log('🔍 Raw chunk received, length:', chunk.length);
+        
+        // Handle Docker multiplexed stream format
+        let offset = 0;
+        while (offset < chunk.length) {
+          // Docker stream format: [stream_type, 0, 0, 0, size1, size2, size3, size4, data...]
+          if (offset + 8 > chunk.length) {
+            // Not enough data for a complete header, save for next chunk
+            break;
+          }
+          
+          const streamType = chunk[offset]; // 1=stdout, 2=stderr
+          const size = chunk.readUInt32BE(offset + 4); // Read size as big-endian uint32
+          
+          console.log(`📦 Docker stream - type: ${streamType}, size: ${size}`);
+          
+          if (offset + 8 + size > chunk.length) {
+            // Not enough data for complete message, save for next chunk
+            break;
+          }
+          
+          // Extract the actual data
+          const data = chunk.subarray(offset + 8, offset + 8 + size).toString();
+          console.log('📝 Extracted data:', JSON.stringify(data));
+          
+          buffer += data;
+          offset += 8 + size;
+        }
+        
+        // Process complete lines from buffer
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+        
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (trimmedLine) {
+            console.log('📋 Processing line:', trimmedLine);
+            
+            try {
+              const jsonData = JSON.parse(trimmedLine);
+              console.log('✅ Parsed JSON:', jsonData);
+              
+              // Capture session ID for multi-turn conversations
+              if (jsonData.session_id && !capturedSessionId) {
+                capturedSessionId = jsonData.session_id;
+                console.log(`📝 Captured session ID: ${capturedSessionId}`);
+              }
+              
+              // Handle different Claude CLI output formats
+              if (jsonData.type === 'assistant' && jsonData.message?.content) {
+                // Assistant message format - this is the main content
+                const content = jsonData.message.content;
+                if (Array.isArray(content)) {
+                  for (const item of content) {
+                    if (item.type === 'text' && item.text) {
+                      console.log('📤 Sending assistant text:', item.text);
+                      res.write(item.text + '\n\n'); // Add double line break between messages
+                      hasStarted = true;
+                      break; // Only send the first text item to avoid duplicates
+                    } else if (item.type === 'tool_use') {
+                      // Handle tool use blocks
+                      console.log('🔧 Tool use detected:', item.name);
+                      // Send structured tool call data that frontend can parse
+                      const toolCallData = {
+                        type: 'tool_call',
+                        name: item.name,
+                        id: item.id,
+                        arguments: item.input || {}
+                      };
+                      res.write(`\n__TOOL_CALL_START__${JSON.stringify(toolCallData)}__TOOL_CALL_END__\n`);
+                      hasStarted = true;
+                    }
+                  }
+                }
+              } else if (jsonData.type === 'tool_use' && jsonData.name) {
+                // Direct tool use format
+                console.log('🔧 Direct tool use detected:', jsonData.name);
+                const toolCallData = {
+                  type: 'tool_call',
+                  name: jsonData.name,
+                  id: jsonData.id,
+                  arguments: jsonData.input || {}
+                };
+                res.write(`\n__TOOL_CALL_START__${JSON.stringify(toolCallData)}__TOOL_CALL_END__\n`);
+                hasStarted = true;
+              } else if (jsonData.type === 'result' && jsonData.result) {
+                // Result format - this is the final complete message, only send if no assistant message was sent
+                if (!hasStarted) {
+                  console.log('📤 Sending result text:', jsonData.result);
+                  res.write(jsonData.result + '\n\n'); // Add double line break between messages
+                  hasStarted = true;
+                } else {
+                  console.log('ℹ️ Skipping result message as assistant message already sent');
+      }
+              } else if (jsonData.type === 'content_block_delta' && jsonData.delta?.text) {
+                // Streaming delta format
+                console.log('📤 Sending delta text:', jsonData.delta.text);
+                res.write(jsonData.delta.text);
+                hasStarted = true;
+              } else if (jsonData.type === 'message_stop') {
+                console.log('🛑 Message stop received');
+                res.end();
+                return;
+              } else if (jsonData.type === 'error') {
+                console.log('❌ Error in stream:', jsonData.error);
+                if (!hasStarted) {
+                  res.write(`Error: ${jsonData.error?.message || 'Unknown error'}`);
+                }
+                res.end();
+                return;
+              } else {
+                console.log('ℹ️ Other JSON type:', jsonData.type);
+              }
+            } catch (parseError) {
+              console.log('⚠️ JSON parse failed, treating as text:', trimmedLine);
+              // If it's not JSON, treat as plain text (but filter out debug info)
+              if (trimmedLine && 
+                  !trimmedLine.includes('INFO') && 
+                  !trimmedLine.includes('DEBUG') &&
+                  !trimmedLine.includes('session_id') &&
+                  trimmedLine.length < 1000) { // Avoid super long lines that might be corrupted
+                res.write(trimmedLine + '\n');
+                hasStarted = true;
+              }
+            }
+          }
+        }
+      });
+
+      stream.on('end', () => {
+        console.log('🏁 Stream ended, buffer:', JSON.stringify(buffer));
+        
+        // Process any remaining buffer
+        if (buffer.trim()) {
+          try {
+            const jsonData = JSON.parse(buffer.trim());
+            if (jsonData.type === 'content_block_delta' && jsonData.delta?.text) {
+              res.write(jsonData.delta.text);
+              hasStarted = true;
+            }
+          } catch (parseError) {
+            const trimmedBuffer = buffer.trim();
+            if (trimmedBuffer && !trimmedBuffer.includes('{') && !trimmedBuffer.includes('INFO') && !trimmedBuffer.includes('DEBUG')) {
+              res.write(trimmedBuffer);
+              hasStarted = true;
+            }
+          }
+        }
+        
+        if (!hasStarted) {
+          console.log('❌ No content was streamed, ending with error message');
+          res.write('No response from Claude. Please check authentication and try again.');
+        } else {
+          console.log('✅ Stream completed successfully');
+        }
+
+        // Store session ID for future conversations
+        if (capturedSessionId) {
+          claudeSessions.set(sessionKey, capturedSessionId);
+          console.log(`💾 Stored session ID ${capturedSessionId} for ${sessionKey}`);
+        }
+
+        res.end();
+      });
+
+      stream.on('error', (error) => {
+        console.error('❌ Stream error:', error);
+        if (!hasStarted) {
+          res.write(`Stream error: ${error.message}`);
+        }
+        if (!res.headersSent) {
+          res.end();
+        }
+      });
+
+      // Handle client disconnect
+      req.on('close', () => {
+        stream.destroy();
       });
       
     } catch (claudeError) {
@@ -1352,6 +2445,26 @@ app.post('/api/claude', async (req, res) => {
     console.error('Claude AI endpoint error:', err);
     return res.status(500).json({ error: 'Failed to process Claude AI request' });
   }
+  });
+
+  // Clear Claude session endpoint
+  app.delete('/api/claude/session/:userId/:repoName', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      const sessionKey = `${userId}:${repoName}`;
+      
+      if (claudeSessions.has(sessionKey)) {
+        const sessionId = claudeSessions.get(sessionKey);
+        claudeSessions.delete(sessionKey);
+        console.log(`🗑️ Cleared Claude session ${sessionId} for ${sessionKey}`);
+        return res.json({ message: 'Session cleared successfully', sessionId });
+      } else {
+        return res.json({ message: 'No active session found' });
+      }
+    } catch (err) {
+      console.error('Clear session error:', err);
+      return res.status(500).json({ error: 'Failed to clear session' });
+    }
   });
 
   // Container management endpoints
@@ -1459,6 +2572,19 @@ app.post('/api/claude', async (req, res) => {
     }
   });
   
+  // Global error handler
+  app.use((error: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('Global error:', error.message);
+    
+    if (!res.headersSent) {
+      res.status(500).json({ 
+        error: 'Internal server error',
+        message: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
+    }
+  });
+
   app.listen(port, () => {
     console.log(`Server running on port ${port}`);
   });

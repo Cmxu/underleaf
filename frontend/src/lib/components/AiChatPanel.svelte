@@ -1,18 +1,57 @@
 <script lang="ts">
 	import { createEventDispatcher } from 'svelte';
+	import { apiClient } from '$utils/api';
+	import { marked } from 'marked';
 
 	export let isVisible = false;
 	export let height = 300; // Default height in pixels
-	export let messages: Array<{ role: 'user' | 'assistant'; content: string; timestamp: Date }> = [];
+	export let messages: Array<{ 
+		role: 'user' | 'assistant'; 
+		content: string; 
+		timestamp: Date;
+		contentBlocks?: Array<{ 
+			type: 'text' | 'tool_call'; 
+			content?: string; 
+			toolCall?: { name: string; id: string; arguments: any; expanded?: boolean };
+		}>;
+	}> = [];
 	export let isLoading = false;
+	export let repoName = '';
+	export let userId = 'anonymous';
+
+	let messagesContainer: HTMLDivElement;
+	let typingDots = '.';
+
+	// Animate typing dots
+	let typingInterval: NodeJS.Timeout | null = null;
+	
+	$: if (isLoading) {
+		if (!typingInterval) {
+			typingInterval = setInterval(() => {
+				typingDots = typingDots.length >= 3 ? '.' : typingDots + '.';
+			}, 500);
+		}
+	} else {
+		if (typingInterval) {
+			clearInterval(typingInterval);
+			typingInterval = null;
+			typingDots = '.';
+		}
+	}
 
 	const dispatch = createEventDispatcher<{
 		heightChange: number;
 		sendMessage: string;
 		clearMessages: void;
+		claudeCodeRequired: { authUrl: string; sessionId: string; };
 	}>();
 
 	let currentMessage = '';
+	let setupLoading = false;
+	let authUrl = '';
+	let showSetupResult = false;
+	let setupResultMessage = '';
+	let setupInstructions: string[] = [];
 
 	function handleSendMessage() {
 		if (!currentMessage.trim() || isLoading) return;
@@ -35,8 +74,54 @@
 		return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 	}
 
+	// Configure marked for safe HTML rendering
+	marked.setOptions({
+		breaks: true, // Convert line breaks to <br>
+		gfm: true, // GitHub Flavored Markdown
+	});
+
+	function renderMarkdown(content: string): string {
+		try {
+			const result = marked(content);
+			// Handle both sync and async returns from marked
+			if (typeof result === 'string') {
+				return result;
+			} else {
+				// If it's a Promise, return the original content as fallback
+				console.warn('Markdown rendering returned a Promise, using plain text');
+				return content;
+			}
+		} catch (error) {
+			console.error('Markdown rendering error:', error);
+			return content; // Fallback to plain text
+		}
+	}
+
 	function clearChat() {
 		dispatch('clearMessages');
+	}
+
+	function toggleToolCall(messageIndex: number, blockIndex: number) {
+		messages = messages.map((msg, msgIdx) => {
+			if (msgIdx === messageIndex && msg.contentBlocks) {
+				return {
+					...msg,
+					contentBlocks: msg.contentBlocks.map((block, blkIdx) => {
+						if (blkIdx === blockIndex && block.type === 'tool_call' && block.toolCall) {
+							return {
+								...block,
+								toolCall: {
+									...block.toolCall,
+									expanded: !block.toolCall.expanded
+								}
+							};
+						}
+						return block;
+					})
+				};
+			}
+			return msg;
+		});
 	}
 
 	// Handle height changes
@@ -44,12 +129,91 @@
 		height = Math.max(200, Math.min(600, newHeight));
 		dispatch('heightChange', height);
 	}
+
+	async function startClaudeSetup() {
+		if (!repoName) {
+			setupResultMessage = 'No repository loaded. Please open a repository first.';
+			showSetupResult = true;
+			return;
+		}
+
+		setupLoading = true;
+		showSetupResult = false;
+		authUrl = '';
+
+		try {
+			const result = await apiClient.startClaudeInteractiveSetup(repoName, userId);
+			
+			setupResultMessage = result.message;
+			showSetupResult = true;
+			
+			if (result.needsUserCode && result.authUrl && result.sessionId) {
+				// Hide the setup result and trigger the modal via event
+				showSetupResult = false;
+				dispatch('claudeCodeRequired', { 
+					authUrl: result.authUrl, 
+					sessionId: result.sessionId 
+				});
+				return;
+			}
+			
+			if (result.authUrl) {
+				authUrl = result.authUrl;
+				setupInstructions = result.instructions || [];
+			}
+			
+			if (result.warning) {
+				setupResultMessage += '\n\n⚠️ ' + result.warning;
+			}
+		} catch (error) {
+			setupResultMessage = `Setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+			showSetupResult = true;
+		} finally {
+			setupLoading = false;
+		}
+	}
+
+	function openAuthUrl() {
+		if (authUrl) {
+			window.open(authUrl, '_blank');
+		}
+	}
+
+	// Smart auto-scroll logic
+	let lastMessageCount = 0;
+	let shouldAutoScroll = true;
+
+	// Check if user is near bottom of chat
+	function checkScrollPosition() {
+		if (!messagesContainer) return;
+		const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
+		const isNearBottom = scrollTop + clientHeight >= scrollHeight - 50; // 50px threshold
+		shouldAutoScroll = isNearBottom;
+	}
+
+	// Auto-scroll only when new messages are added and user is near bottom
+	$: if (messages.length > lastMessageCount && messagesContainer && shouldAutoScroll) {
+		setTimeout(() => {
+			messagesContainer.scrollTop = messagesContainer.scrollHeight;
+		}, 10);
+		lastMessageCount = messages.length;
+	} else if (messages.length !== lastMessageCount) {
+		lastMessageCount = messages.length;
+	}
+
+	// Cleanup on component destroy
+	import { onDestroy } from 'svelte';
+	onDestroy(() => {
+		if (typingInterval) {
+			clearInterval(typingInterval);
+		}
+	});
 </script>
 
 {#if isVisible}
 	<div 
-		class="bg-dark-800 border-t border-gray-700 flex flex-col"
-		style="height: {height}px;"
+		class="bg-dark-800 border-t border-gray-700 flex flex-col h-full"
+		style="height: {height}px; min-height: 0;"
 	>
 		<!-- Chat Header -->
 		<div class="bg-dark-700 px-4 py-3 border-b border-gray-600 flex items-center justify-between">
@@ -62,6 +226,22 @@
 			</div>
 			
 			<div class="flex items-center space-x-2">
+				<button
+					on:click={startClaudeSetup}
+					disabled={setupLoading}
+					class="text-gray-400 hover:text-white transition-colors text-xs px-2 py-1 rounded hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+					title="Setup Claude AI Authentication"
+					aria-label="Setup Claude AI Authentication"
+				>
+					{#if setupLoading}
+						<div class="w-4 h-4 border-2 border-gray-400 border-t-white rounded-full animate-spin"></div>
+					{:else}
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+						</svg>
+					{/if}
+				</button>
 				<button
 					on:click={clearChat}
 					disabled={messages.length === 0}
@@ -77,7 +257,45 @@
 		</div>
 
 		<!-- Messages Area -->
-		<div class="flex-1 overflow-y-auto p-4 space-y-3">
+		<div bind:this={messagesContainer} on:scroll={checkScrollPosition} class="flex-1 overflow-y-auto p-4 space-y-3 min-h-0 ai-chat-messages">
+			{#if showSetupResult}
+				<div class="bg-blue-900/50 border border-blue-600 rounded-lg p-4 mb-4">
+					<div class="flex items-start space-x-3">
+						<svg class="w-5 h-5 text-blue-400 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+						</svg>
+						<div class="flex-1">
+							<h4 class="text-sm font-medium text-blue-300 mb-2">Claude AI Setup</h4>
+							<p class="text-sm text-gray-300 whitespace-pre-wrap">{setupResultMessage}</p>
+							
+							{#if authUrl}
+								<div class="mt-4">
+									<h5 class="text-xs font-medium text-blue-300 mb-2">Authentication Instructions:</h5>
+									<ul class="text-xs text-gray-400 space-y-1 mb-3">
+										{#each setupInstructions as instruction}
+											<li>• {instruction}</li>
+										{/each}
+									</ul>
+									<button
+										on:click={openAuthUrl}
+										class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm transition-colors"
+									>
+										Open Authentication URL
+									</button>
+								</div>
+							{/if}
+							
+							<button
+								on:click={() => showSetupResult = false}
+								class="mt-3 text-xs text-gray-400 hover:text-gray-300 underline"
+							>
+								Dismiss
+							</button>
+						</div>
+					</div>
+				</div>
+			{/if}
+
 			{#if messages.length === 0}
 				<div class="text-center text-gray-400 py-8">
 					<svg class="w-12 h-12 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -87,9 +305,9 @@
 					<p class="text-xs text-gray-500 mt-1">Ask questions about LaTeX, get help with your document, or request code assistance</p>
 				</div>
 			{:else}
-				{#each messages as message}
+				{#each messages as message, index}
 					<div class="flex {message.role === 'user' ? 'justify-end' : 'justify-start'}">
-						<div class="max-w-[80%] {message.role === 'user' ? 'bg-blue-600' : 'bg-dark-600'} rounded-lg px-3 py-2">
+						<div class="max-w-[80%] {message.role === 'user' ? 'bg-blue-600' : 'bg-dark-600'} rounded-lg px-3 py-2 overflow-hidden word-wrap break-words">
 							<div class="flex items-center space-x-2 mb-1">
 								<span class="text-xs font-medium {message.role === 'user' ? 'text-blue-100' : 'text-gray-300'}">
 									{message.role === 'user' ? 'You' : 'AI'}
@@ -98,20 +316,70 @@
 									{formatTime(message.timestamp)}
 								</span>
 							</div>
-							<p class="text-sm {message.role === 'user' ? 'text-white' : 'text-gray-200'} whitespace-pre-wrap">
-								{message.content}
-							</p>
+							{#if message.role === 'user'}
+								<p class="text-sm text-white whitespace-pre-wrap break-words overflow-hidden">
+									{message.content}
+								</p>
+							{:else}
+								<!-- Render content blocks in order if available -->
+								{#if message.contentBlocks && message.contentBlocks.length > 0}
+									{#each message.contentBlocks as block, blockIndex}
+										{#if block.type === 'tool_call' && block.toolCall}
+											<div class="mb-2 border border-gray-500 rounded-md overflow-hidden">
+												<button
+													on:click={() => toggleToolCall(index, blockIndex)}
+													class="w-full px-3 py-2 bg-gray-700 hover:bg-gray-600 transition-colors flex items-center justify-between text-left"
+												>
+													<div class="flex items-center space-x-2">
+														<span class="text-orange-400">🔧</span>
+														<span class="text-sm font-medium text-gray-200">Tool Call: {block.toolCall.name}</span>
+													</div>
+													<svg 
+														class="w-4 h-4 text-gray-400 transition-transform {block.toolCall.expanded ? 'rotate-180' : ''}" 
+														fill="none" 
+														stroke="currentColor" 
+														viewBox="0 0 24 24"
+													>
+														<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+													</svg>
+												</button>
+												{#if block.toolCall.expanded}
+													<div class="px-3 py-2 bg-gray-800 border-t border-gray-600">
+														<div class="text-xs text-gray-400 mb-1">Arguments:</div>
+														<pre class="text-xs text-gray-300 overflow-x-auto whitespace-pre-wrap break-words">{JSON.stringify(block.toolCall.arguments, null, 2)}</pre>
+													</div>
+												{/if}
+											</div>
+										{:else if block.type === 'text' && block.content}
+											<div class="text-sm text-gray-200 break-words overflow-hidden markdown-content">
+												{@html renderMarkdown(block.content)}
+											</div>
+										{/if}
+									{/each}
+									{#if isLoading && index === messages.length - 1}
+										<br/><span class="text-gray-400">{typingDots}</span>
+									{/if}
+								{:else}
+									<!-- Fallback to regular message content for backward compatibility -->
+									<div class="text-sm text-gray-200 break-words overflow-hidden markdown-content">
+										{@html renderMarkdown(message.content)}
+										{#if isLoading && index === messages.length - 1}
+											<br/><span class="text-gray-400">{typingDots}</span>
+										{/if}
+									</div>
+								{/if}
+							{/if}
 						</div>
 					</div>
 				{/each}
 			{/if}
 
-			{#if isLoading}
+			{#if isLoading && (messages.length === 0 || messages[messages.length - 1].role === 'user')}
+				<!-- Show typing indicator only when no assistant message exists yet -->
 				<div class="flex justify-start">
 					<div class="bg-dark-600 rounded-lg px-3 py-2">
 						<div class="flex items-center space-x-2">
-							<div class="loading-spinner w-4 h-4"></div>
-							<span class="text-xs text-gray-300">AI is typing...</span>
+							<span class="text-sm text-gray-300">{typingDots}</span>
 						</div>
 					</div>
 				</div>
@@ -145,3 +413,134 @@
 		</div>
 	</div>
 {/if}
+
+<style>
+
+
+	/* Ensure proper scrolling behavior */
+	:global(.ai-chat-messages) {
+		scrollbar-width: thin;
+		scrollbar-color: #4B5563 #1F2937;
+	}
+
+	:global(.ai-chat-messages::-webkit-scrollbar) {
+		width: 6px;
+	}
+
+	:global(.ai-chat-messages::-webkit-scrollbar-track) {
+		background: #1F2937;
+	}
+
+	:global(.ai-chat-messages::-webkit-scrollbar-thumb) {
+		background: #4B5563;
+		border-radius: 3px;
+	}
+
+	:global(.ai-chat-messages::-webkit-scrollbar-thumb:hover) {
+		background: #6B7280;
+	}
+
+	/* Markdown content styling for dark theme */
+	:global(.markdown-content h1) {
+		font-size: 1.25rem;
+		font-weight: 600;
+		margin: 0.5rem 0;
+		color: #F3F4F6;
+	}
+
+	:global(.markdown-content h2) {
+		font-size: 1.125rem;
+		font-weight: 600;
+		margin: 0.5rem 0;
+		color: #F3F4F6;
+	}
+
+	:global(.markdown-content h3) {
+		font-size: 1rem;
+		font-weight: 600;
+		margin: 0.5rem 0;
+		color: #F3F4F6;
+	}
+
+	:global(.markdown-content strong) {
+		font-weight: 600;
+		color: #F9FAFB;
+	}
+
+	:global(.markdown-content em) {
+		font-style: italic;
+		color: #E5E7EB;
+	}
+
+	:global(.markdown-content code) {
+		background-color: #374151;
+		color: #F59E0B;
+		padding: 0.125rem 0.25rem;
+		border-radius: 0.25rem;
+		font-family: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
+		font-size: 0.875rem;
+	}
+
+	:global(.markdown-content pre) {
+		background-color: #1F2937;
+		color: #E5E7EB;
+		padding: 0.75rem;
+		border-radius: 0.5rem;
+		overflow-x: auto;
+		margin: 0.5rem 0;
+		border: 1px solid #374151;
+	}
+
+	:global(.markdown-content pre code) {
+		background-color: transparent;
+		color: inherit;
+		padding: 0;
+		border-radius: 0;
+	}
+
+	:global(.markdown-content ul) {
+		list-style-type: disc;
+		margin-left: 1.5rem;
+		margin: 0.5rem 0 0.5rem 1.5rem;
+	}
+
+	:global(.markdown-content ol) {
+		list-style-type: decimal;
+		margin-left: 1.5rem;
+		margin: 0.5rem 0 0.5rem 1.5rem;
+	}
+
+	:global(.markdown-content li) {
+		margin: 0.25rem 0;
+	}
+
+	:global(.markdown-content blockquote) {
+		border-left: 4px solid #4B5563;
+		padding-left: 1rem;
+		margin: 0.5rem 0;
+		color: #9CA3AF;
+		font-style: italic;
+	}
+
+	:global(.markdown-content a) {
+		color: #60A5FA;
+		text-decoration: underline;
+	}
+
+	:global(.markdown-content a:hover) {
+		color: #93C5FD;
+	}
+
+	:global(.markdown-content p) {
+		margin: 0.5rem 0;
+		line-height: 1.5;
+	}
+
+	:global(.markdown-content p:first-child) {
+		margin-top: 0;
+	}
+
+	:global(.markdown-content p:last-child) {
+		margin-bottom: 0;
+	}
+</style>

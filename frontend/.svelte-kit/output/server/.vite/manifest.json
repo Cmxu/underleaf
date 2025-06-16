@@ -15,6 +15,7 @@
     "src": "../node_modules/@sveltejs/kit/src/runtime/server/index.js",
     "isEntry": true,
     "imports": [
+      "_index.js",
       "_internal.js",
       "_exports.js"
     ]
@@ -28,23 +29,27 @@
       "_internal.js"
     ]
   },
+  "_auth.js": {
+    "file": "chunks/auth.js",
+    "name": "auth",
+    "imports": [
+      "_exports.js",
+      "_supabase.js"
+    ]
+  },
   "_client.js": {
     "file": "chunks/client.js",
     "name": "client",
     "imports": [
       "_exports.js",
-      "_equality.js"
+      "_index.js"
     ]
-  },
-  "_equality.js": {
-    "file": "chunks/equality.js",
-    "name": "equality"
   },
   "_exports.js": {
     "file": "chunks/exports.js",
     "name": "exports",
     "imports": [
-      "_equality.js"
+      "_index.js"
     ]
   },
   "_index.js": {
@@ -55,9 +60,12 @@
     "file": "chunks/internal.js",
     "name": "internal",
     "imports": [
-      "_equality.js",
       "_index.js"
     ]
+  },
+  "_supabase.js": {
+    "file": "chunks/supabase.js",
+    "name": "supabase"
   },
   "src/routes/+layout.svelte": {
     "file": "entries/pages/_layout.svelte.js",
@@ -68,7 +76,7 @@
       "_index.js"
     ],
     "css": [
-      "_app/immutable/assets/_layout.BWdsd5L7.css"
+      "_app/immutable/assets/_layout.ej5dywAL.css"
     ]
   },
   "src/routes/+page.svelte": {
@@ -78,7 +86,23 @@
     "isEntry": true,
     "imports": [
       "_index.js",
-      "_client.js"
+      "_client.js",
+      "_exports.js",
+      "_auth.js"
+    ],
+    "css": [
+      "_app/immutable/assets/_page.DQxKS5lj.css"
+    ]
+  },
+  "src/routes/auth/callback/+page.svelte": {
+    "file": "entries/pages/auth/callback/_page.svelte.js",
+    "name": "entries/pages/auth/callback/_page.svelte",
+    "src": "src/routes/auth/callback/+page.svelte",
+    "isEntry": true,
+    "imports": [
+      "_index.js",
+      "_client.js",
+      "_supabase.js"
     ]
   },
   "src/routes/editor/+page.svelte": {
@@ -89,7 +113,10 @@
     "imports": [
       "_index.js",
       "_client.js",
-      "_equality.js"
+      "_auth.js"
+    ],
+    "css": [
+      "_app/immutable/assets/_page.DDJoTjz0.css"
     ]
   }
 }

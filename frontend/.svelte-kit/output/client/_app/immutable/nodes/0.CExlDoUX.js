@@ -1,2 +1,0 @@
-import{f as o,a as f}from"../chunks/BygsjDEO.js";import"../chunks/DL-nje0L.js";import{h as s,a as l,A as m,B as d}from"../chunks/B9Ev1FTx.js";function u(r,t,a,n,h){s&&l();var e=t.$$slots?.[a],i=!1;e===!0&&(e=t.children,i=!0),e===void 0||e(r,i?()=>n:n)}var c=o("<main><!></main>");function y(r,t){var a=c(),n=m(a);u(n,t,"default",{}),d(a),f(r,a)}export{y as component};
-//# sourceMappingURL=0.CExlDoUX.js.map

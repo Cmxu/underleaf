@@ -218,6 +218,98 @@ class ApiClient {
 		});
 	}
 
+	async sendClaudeMessageStreaming(
+		repoName: string,
+		message: string,
+		onChunk: (chunk: string) => void,
+		userId = 'anonymous'
+	): Promise<void> {
+		const response = await fetch(`${this.baseUrl}/api/claude`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify({ repoName, message, userId })
+		});
+
+		if (!response.ok) {
+			const error = await response.json();
+			throw new Error(error.error || 'Failed to send message');
+		}
+
+		if (!response.body) {
+			throw new Error('No response body');
+		}
+
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				
+				if (done) {
+					break;
+				}
+
+				const chunk = decoder.decode(value, { stream: true });
+				onChunk(chunk);
+			}
+		} finally {
+			reader.releaseLock();
+		}
+	}
+
+	async startClaudeInteractiveSetup(
+		repoName: string,
+		userId = 'anonymous',
+		step = 'start'
+	): Promise<{
+		message: string;
+		authUrl?: string;
+		step: string;
+		instructions?: string[];
+		output?: string;
+		warning?: string;
+		configured?: boolean;
+		needsUserCode?: boolean;
+		sessionId?: string;
+	}> {
+		return this.request('/api/claude/interactive-setup', {
+			method: 'POST',
+			body: JSON.stringify({ repoName, userId, step })
+		});
+	}
+
+	async verifyClaudeCode(
+		repoName: string,
+		verificationCode: string,
+		sessionId: string,
+		userId = 'anonymous'
+	): Promise<{
+		message: string;
+		step: string;
+		configured?: boolean;
+		error?: string;
+	}> {
+		return this.request('/api/claude/verify-code', {
+			method: 'POST',
+			body: JSON.stringify({ repoName, verificationCode, sessionId, userId })
+		});
+	}
+
+	async clearClaudeSession(
+		repoName: string,
+		userId = 'anonymous'
+	): Promise<{
+		message: string;
+		sessionId?: string;
+	}> {
+		return this.request(`/api/claude/session/${userId}/${repoName}`, {
+			method: 'DELETE'
+		});
+	}
+
 	async ensureUserContainer(
 		repoName: string,
 		userId: string
