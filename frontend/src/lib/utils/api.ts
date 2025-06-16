@@ -310,6 +310,62 @@ class ApiClient {
 		});
 	}
 
+	async getPermissionPrompts(
+		repoName: string,
+		userId = 'anonymous'
+	): Promise<{
+		prompts: Array<{
+			id: string;
+			message: string;
+			action: string;
+			details: Record<string, any>;
+			severity: 'low' | 'medium' | 'high';
+			timestamp: string;
+			status: string;
+		}>;
+	}> {
+		return this.request(`/api/claude/permissions/${userId}/${repoName}`, {
+			method: 'GET'
+		});
+	}
+
+	async respondToPermissionPrompt(
+		repoName: string,
+		promptId: string,
+		approved: boolean,
+		reason?: string,
+		userId = 'anonymous'
+	): Promise<{
+		message: string;
+		promptId: string;
+		approved: boolean;
+		reason?: string;
+	}> {
+		return this.request(`/api/claude/permissions/${userId}/${repoName}/respond`, {
+			method: 'POST',
+			body: JSON.stringify({ promptId, approved, reason })
+		});
+	}
+
+	async executeCommand(
+		repoName: string,
+		command: string,
+		userId = 'anonymous'
+	): Promise<{
+		success: boolean;
+		command: string;
+		stdout: string;
+		stderr: string;
+		duration: number;
+		timestamp: string;
+		error?: string;
+	}> {
+		return this.request('/api/execute-command', {
+			method: 'POST',
+			body: JSON.stringify({ repoName, command, userId })
+		});
+	}
+
 	async ensureUserContainer(
 		repoName: string,
 		userId: string

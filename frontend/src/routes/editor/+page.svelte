@@ -8,6 +8,308 @@
 	import { apiClient } from '$lib/utils/api';
 	import { authStore } from '$lib/stores/auth';
 	import type { GitStatusResponse } from '$lib/types/api';
+	
+	// Enhanced diff calculation for Monaco editor integration
+	function calculateDiff(originalText: string, newText: string) {
+		const originalLines = originalText.split('\n');
+		const newLines = newText.split('\n');
+		const diff = [];
+		
+		// Simple line-by-line diff - we can enhance this later
+		const maxLines = Math.max(originalLines.length, newLines.length);
+		
+		for (let i = 0; i < maxLines; i++) {
+			const originalLine = originalLines[i];
+			const newLine = newLines[i];
+			
+			if (originalLine === undefined) {
+				// Addition
+				diff.push({ type: 'addition', line: newLine, lineNumber: i + 1 });
+			} else if (newLine === undefined) {
+				// Deletion
+				diff.push({ type: 'deletion', line: originalLine, lineNumber: i + 1 });
+			} else if (originalLine !== newLine) {
+				// Modification
+				diff.push({ type: 'deletion', line: originalLine, lineNumber: i + 1 });
+				diff.push({ type: 'addition', line: newLine, lineNumber: i + 1 });
+			} else {
+				// No change
+				diff.push({ type: 'context', line: originalLine, lineNumber: i + 1 });
+			}
+		}
+		
+		return diff;
+	}
+
+	// Find the range of changes in the editor content
+	function findChangeRange(originalContent: string, oldString: string, newString: string) {
+		const lines = originalContent.split('\n');
+		const oldLines = oldString.split('\n');
+		
+		// Find where the old string starts in the content
+		for (let i = 0; i <= lines.length - oldLines.length; i++) {
+			let match = true;
+			for (let j = 0; j < oldLines.length; j++) {
+				if (lines[i + j] !== oldLines[j]) {
+					match = false;
+					break;
+				}
+			}
+			if (match) {
+				return {
+					startLine: i + 1, // Monaco uses 1-based line numbers
+					endLine: i + oldLines.length,
+					startColumn: 1,
+					endColumn: lines[i + oldLines.length - 1]?.length + 1 || 1
+				};
+			}
+		}
+		return null;
+	}
+
+	// Function to detect if a tool call is an Edit and create in-editor diff
+	function processEditToolCall(toolCall: { name: string; arguments: any; id: string }) {
+		console.log('🔍 Processing tool call:', toolCall);
+		
+		if (toolCall.name === 'Edit' && toolCall.arguments.file_path && toolCall.arguments.old_string && toolCall.arguments.new_string) {
+			console.log('✅ Edit tool call detected!', {
+				file_path: toolCall.arguments.file_path,
+				old_string: toolCall.arguments.old_string?.substring(0, 100) + '...',
+				new_string: toolCall.arguments.new_string?.substring(0, 100) + '...'
+			});
+			
+			try {
+				// Check if this edit is for the currently open file
+				if (currentFilePath && toolCall.arguments.file_path === currentFilePath && monacoEditor) {
+					const currentContent = monacoEditor.getValue();
+					const range = findChangeRange(currentContent, toolCall.arguments.old_string, toolCall.arguments.new_string);
+					
+					if (range) {
+						// Add to pending edits for in-editor display
+						addPendingEdit({
+							id: toolCall.id,
+							range,
+							oldString: toolCall.arguments.old_string,
+							newString: toolCall.arguments.new_string,
+							applied: false,
+							decorationIds: [],
+						});
+						
+						// Update preview content with all changes applied
+						updatePreviewContent();
+						
+						return {
+							filePath: toolCall.arguments.file_path,
+							oldString: toolCall.arguments.old_string,
+							newString: toolCall.arguments.new_string,
+							applied: false,
+							inEditor: true
+						};
+					}
+				}
+				
+				// Fallback for other files or when range not found
+				const diff = calculateDiff(toolCall.arguments.old_string, toolCall.arguments.new_string);
+				
+				const result = {
+					filePath: toolCall.arguments.file_path,
+					oldString: toolCall.arguments.old_string,
+					newString: toolCall.arguments.new_string,
+					diff,
+					applied: false,
+					inEditor: false
+				};
+				
+				console.log('🎯 Created edit diff:', result);
+				return result;
+			} catch (error) {
+				console.error('Error processing edit tool call:', error);
+				return null;
+			}
+		} else {
+			console.log('ℹ️ Not an Edit tool call or missing required arguments:', {
+				name: toolCall.name,
+				hasFilePath: !!toolCall.arguments?.file_path,
+				hasOldString: !!toolCall.arguments?.old_string,
+				hasNewString: !!toolCall.arguments?.new_string
+			});
+		}
+		return null;
+	}
+
+	// Functions for managing in-editor diffs
+	function addPendingEdit(edit: any) {
+		pendingEdits = [...pendingEdits, edit];
+		updateEditorDecorations();
+	}
+
+	function updateEditorDecorations() {
+		if (!monacoEditor || !monaco) return;
+
+		// Clear existing decorations
+		if (editorDecorations.length > 0) {
+			monacoEditor.deltaDecorations(editorDecorations, []);
+			editorDecorations = [];
+		}
+
+		// Add decorations for each pending edit
+		const decorations: any[] = [];
+		
+		pendingEdits.forEach((edit, index) => {
+			if (!edit.applied) {
+				// Highlight the range that will be changed
+				decorations.push({
+					range: new monaco.Range(edit.range.startLine, edit.range.startColumn, edit.range.endLine, edit.range.endColumn),
+					options: {
+						className: 'pending-edit-decoration',
+						hoverMessage: { value: `**Pending Change ${index + 1}**\n\nOld: \`${edit.oldString}\`\n\nNew: \`${edit.newString}\`` },
+						minimap: {
+							color: '#ff9800',
+							position: monaco.editor.MinimapPosition.Inline
+						},
+						overviewRuler: {
+							color: '#ff9800',
+							position: monaco.editor.OverviewRulerLane.Right
+						}
+					}
+				});
+
+				// Add line decorations to show deletion/addition indicators
+				for (let line = edit.range.startLine; line <= edit.range.endLine; line++) {
+					decorations.push({
+						range: new monaco.Range(line, 1, line, 1),
+						options: {
+							isWholeLine: true,
+							linesDecorationsClassName: 'pending-edit-line-decoration',
+							marginClassName: 'pending-edit-margin'
+						}
+					});
+				}
+			}
+		});
+
+		if (decorations.length > 0) {
+			editorDecorations = monacoEditor.deltaDecorations([], decorations);
+		}
+
+		// Add content widgets for action buttons
+		addActionWidgets();
+	}
+
+	function addActionWidgets() {
+		if (!monacoEditor || !monaco) return;
+
+		pendingEdits.forEach((edit, index) => {
+			if (!edit.applied && !edit.widgetId) {
+				const widgetId = `pending-edit-widget-${edit.id}`;
+				
+				const widget = {
+					getId: () => widgetId,
+					getDomNode: () => {
+						const domNode = document.createElement('div');
+						domNode.className = 'pending-edit-widget';
+						domNode.innerHTML = `
+							<div class="pending-edit-actions">
+								<button class="apply-btn" data-edit-id="${edit.id}">Apply</button>
+								<button class="reject-btn" data-edit-id="${edit.id}">Reject</button>
+								<span class="edit-preview">${edit.oldString.substring(0, 20)}... → ${edit.newString.substring(0, 20)}...</span>
+							</div>
+						`;
+						
+						// Add event listeners
+						const applyBtn = domNode.querySelector('.apply-btn');
+						const rejectBtn = domNode.querySelector('.reject-btn');
+						
+						applyBtn?.addEventListener('click', () => applyPendingEdit(edit.id));
+						rejectBtn?.addEventListener('click', () => rejectPendingEdit(edit.id));
+						
+						return domNode;
+					},
+					getPosition: () => ({
+						position: {
+							lineNumber: edit.range.startLine,
+							column: 1
+						},
+						preference: [monaco.editor.ContentWidgetPositionPreference.ABOVE]
+					})
+				};
+
+				monacoEditor.addContentWidget(widget);
+				edit.widgetId = widgetId;
+			}
+		});
+	}
+
+	function updatePreviewContent() {
+		if (!monacoEditor) return;
+		
+		// Start with current editor content
+		let content = originalEditorContent || monacoEditor.getValue();
+		
+		// Apply all pending edits to create preview
+		pendingEdits.forEach(edit => {
+			content = content.replace(edit.oldString, edit.newString);
+		});
+		
+		previewContent = content;
+	}
+
+	function applyPendingEdit(editId: string) {
+		const editIndex = pendingEdits.findIndex(e => e.id === editId);
+		if (editIndex === -1) return;
+
+		const edit = pendingEdits[editIndex];
+		
+		// Apply the change to the editor
+		const currentContent = monacoEditor.getValue();
+		const newContent = currentContent.replace(edit.oldString, edit.newString);
+		
+		// Store original content if this is the first edit
+		if (!originalEditorContent) {
+			originalEditorContent = currentContent;
+		}
+		
+		monacoEditor.setValue(newContent);
+		
+		// Mark as applied and remove from pending
+		edit.applied = true;
+		pendingEdits = pendingEdits.filter(e => e.id !== editId);
+		
+		// Remove the widget
+		if (edit.widgetId) {
+			monacoEditor.removeContentWidget({ getId: () => edit.widgetId });
+		}
+		
+		// Update decorations
+		updateEditorDecorations();
+		updatePreviewContent();
+		
+		// Mark as unsaved
+		unsavedChanges = true;
+		
+		console.log('Applied edit:', editId);
+	}
+
+	function rejectPendingEdit(editId: string) {
+		const editIndex = pendingEdits.findIndex(e => e.id === editId);
+		if (editIndex === -1) return;
+
+		const edit = pendingEdits[editIndex];
+		
+		// Remove from pending edits
+		pendingEdits = pendingEdits.filter(e => e.id !== editId);
+		
+		// Remove the widget
+		if (edit.widgetId) {
+			monacoEditor.removeContentWidget({ getId: () => edit.widgetId });
+		}
+		
+		// Update decorations and preview
+		updateEditorDecorations();
+		updatePreviewContent();
+		
+		console.log('Rejected edit:', editId);
+	}
 
 	let editorContainer: HTMLDivElement;
 	let monacoEditor: any = null; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -20,6 +322,20 @@
 	let unsavedChanges = false;
 	let autoSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let pdfUrl: string | null = null;
+
+	// Editor diff state
+	let pendingEdits: Array<{
+		id: string;
+		range: any;
+		oldString: string;
+		newString: string;
+		applied: boolean;
+		decorationIds: string[];
+		widgetId?: string;
+	}> = [];
+	let editorDecorations: string[] = [];
+	let originalEditorContent: string = '';
+	let previewContent: string = ''; // Content with all changes applied for PDF rendering
 
 	// Layout state
 	let layoutMode: 'both' | 'editor' | 'pdf' = 'both';
@@ -39,7 +355,7 @@
 		contentBlocks?: Array<{ 
 			type: 'text' | 'tool_call'; 
 			content?: string; 
-			toolCall?: { name: string; id: string; arguments: any; expanded?: boolean };
+			toolCall?: { name: string; id: string; arguments: any; expanded?: boolean; editDiff?: any };
 		}>;
 	}> = [];
 	let aiChatLoading = false;
@@ -169,6 +485,9 @@
 				insertSpaces: true
 			});
 
+			// Initialize preview content
+			previewContent = monacoEditor.getValue();
+
 			// Auto-save on content change
 			monacoEditor.onDidChangeModelContent(() => {
 				unsavedChanges = true;
@@ -208,11 +527,18 @@
 			const response = await apiClient.getFileContent(currentRepoName, filePath, userId);
 
 			if (monacoEditor) {
+				// Clear any pending edits when switching files
+				clearPendingEdits();
+				
 				monacoEditor.setValue(response.content);
 				currentFilePath = filePath;
 				unsavedChanges = false;
 				compileError = null;
 				compileSuccess = false;
+				
+				// Reset diff state
+				originalEditorContent = '';
+				previewContent = response.content;
 
 				// Set language based on file extension
 				const ext = filePath.split('.').pop()?.toLowerCase();
@@ -232,6 +558,24 @@
 		} catch (err) {
 			compileError = err instanceof Error ? err.message : 'Failed to load file';
 		}
+	}
+
+	function clearPendingEdits() {
+		// Remove all content widgets
+		pendingEdits.forEach(edit => {
+			if (edit.widgetId) {
+				monacoEditor.removeContentWidget({ getId: () => edit.widgetId });
+			}
+		});
+		
+		// Clear decorations
+		if (editorDecorations.length > 0) {
+			monacoEditor.deltaDecorations(editorDecorations, []);
+			editorDecorations = [];
+		}
+		
+		// Clear pending edits
+		pendingEdits = [];
 	}
 
 	async function handleSaveFile() {
@@ -259,14 +603,21 @@
 		compileError = null;
 		compileSuccess = false;
 
-		// Save current file before compiling
-		if (currentFilePath && unsavedChanges) {
-			await handleSaveFile();
-		}
-
 		try {
-			const texFile = currentFilePath?.endsWith('.tex') ? currentFilePath : 'main.tex';
 			const userId = getCurrentUserId();
+			
+			// If we have pending edits, save preview content temporarily for compilation
+			if (pendingEdits.length > 0 && currentFilePath) {
+				console.log('🎯 Compiling with preview content including pending changes');
+				
+				// Save the preview content (with all pending changes applied) temporarily
+				await apiClient.saveFile(currentRepoName, currentFilePath, previewContent, userId);
+			} else if (currentFilePath && unsavedChanges) {
+				// Save current file normally if no pending edits
+				await handleSaveFile();
+			}
+
+			const texFile = currentFilePath?.endsWith('.tex') ? currentFilePath : 'main.tex';
 			const result = await apiClient.compileRepo(currentRepoName, userId, texFile);
 			compileSuccess = true;
 
@@ -441,11 +792,18 @@
 				currentRepoName, 
 				userMessage, 
 				(chunk: string) => {
+					console.log('📦 Received chunk:', chunk);
+					
 					// Check if chunk contains tool call data
 					const toolCallMatch = chunk.match(/__TOOL_CALL_START__(.+?)__TOOL_CALL_END__/);
 					if (toolCallMatch) {
+						console.log('🔧 Tool call detected in chunk:', chunk);
 						try {
 							const toolCallData = JSON.parse(toolCallMatch[1]);
+							console.log('📋 Parsed tool call data:', toolCallData);
+							
+							// Process edit diff if this is an Edit tool call
+							const editDiff = processEditToolCall(toolCallData);
 							
 							// If this is the first chunk or we need a new message, create one
 							if (currentAssistantMessageIndex === -1) {
@@ -461,7 +819,8 @@
 												name: toolCallData.name,
 												id: toolCallData.id,
 												arguments: toolCallData.arguments,
-												expanded: false
+												expanded: false,
+												editDiff
 											}
 										}]
 									}
@@ -480,7 +839,8 @@
 													name: toolCallData.name,
 													id: toolCallData.id,
 													arguments: toolCallData.arguments,
-													expanded: false
+													expanded: false,
+													editDiff
 												}
 											}]
 										};
@@ -585,6 +945,156 @@
 		}
 	}
 
+	// Debug function to test tool call detection
+	function testToolCallDetection() {
+		const testToolCallData = {
+			name: 'Edit',
+			id: 'test-123',
+			arguments: {
+				file_path: '/test/file.js',
+				old_string: 'const old = "value";',
+				new_string: 'const new = "updated";'
+			}
+		};
+		
+		const editDiff = processEditToolCall(testToolCallData);
+		console.log('🧪 Test tool call result:', editDiff);
+		
+		// Simulate adding this to chat
+		aiChatMessages = [
+			...aiChatMessages,
+			{
+				role: 'assistant',
+				content: 'Testing tool call display',
+				timestamp: new Date(),
+				contentBlocks: [{
+					type: 'tool_call',
+					toolCall: {
+						name: testToolCallData.name,
+						id: testToolCallData.id,
+						arguments: testToolCallData.arguments,
+						expanded: false,
+						editDiff
+					}
+				}]
+			}
+		];
+	}
+
+	// Handle applying edit diffs to the editor
+	async function handleApplyEdit(event: CustomEvent<{ messageIndex: number; blockIndex: number; editDiff: any }>) {
+		const { messageIndex, blockIndex, editDiff } = event.detail;
+		
+		if (!monacoEditor || !editDiff) {
+			console.error('Monaco editor not available or invalid edit diff');
+			return;
+		}
+		
+		try {
+			// Get current editor content
+			const currentContent = monacoEditor.getValue();
+			
+			// Store original content for reverting
+			const originalContent = currentContent;
+			
+			// Find and replace the old string with the new string
+			const newContent = currentContent.replace(editDiff.oldString, editDiff.newString);
+			
+			// Apply the change to the editor
+			monacoEditor.setValue(newContent);
+			
+			// Mark as unsaved
+			unsavedChanges = true;
+			
+			// Update the editDiff with original content for potential revert
+			aiChatMessages = aiChatMessages.map((msg, msgIdx) => {
+				if (msgIdx === messageIndex && msg.contentBlocks) {
+					return {
+						...msg,
+						contentBlocks: msg.contentBlocks.map((block, blkIdx) => {
+							if (blkIdx === blockIndex && block.type === 'tool_call' && block.toolCall) {
+								return {
+									...block,
+									toolCall: {
+										...block.toolCall,
+										editDiff: { 
+											...editDiff, 
+											applied: true,
+											originalContent, // Store original content for revert
+											appliedContent: newContent // Store applied content for reference
+										}
+									}
+								};
+							}
+							return block;
+						})
+					};
+				}
+				return msg;
+			});
+			
+			console.log('Edit applied successfully');
+		} catch (error) {
+			console.error('Failed to apply edit:', error);
+		}
+	}
+
+	// Handle rejecting edit diffs
+	function handleRejectEdit(event: CustomEvent<{ messageIndex: number; blockIndex: number }>) {
+		const { messageIndex, blockIndex } = event.detail;
+		
+		// Find the edit diff to check if it was applied
+		const message = aiChatMessages[messageIndex];
+		const block = message?.contentBlocks?.[blockIndex];
+		const editDiff = block?.toolCall?.editDiff;
+		
+		if (!editDiff) {
+			console.error('No edit diff found for rejection');
+			return;
+		}
+		
+		try {
+			// If the edit was already applied, revert it
+			if (editDiff.applied && editDiff.originalContent && monacoEditor) {
+				console.log('Reverting applied edit to original content');
+				monacoEditor.setValue(editDiff.originalContent);
+				unsavedChanges = true; // Mark as unsaved since we changed content
+			} else {
+				console.log('Edit was not applied, just marking as rejected');
+			}
+			
+			// Mark the edit as rejected in the UI
+			aiChatMessages = aiChatMessages.map((msg, msgIdx) => {
+				if (msgIdx === messageIndex && msg.contentBlocks) {
+					return {
+						...msg,
+						contentBlocks: msg.contentBlocks.map((block, blkIdx) => {
+							if (blkIdx === blockIndex && block.type === 'tool_call' && block.toolCall && block.toolCall.editDiff) {
+								return {
+									...block,
+									toolCall: {
+										...block.toolCall,
+										editDiff: { 
+											...block.toolCall.editDiff, 
+											rejected: true,
+											applied: false // Reset applied state after revert
+										}
+									}
+								};
+							}
+							return block;
+						})
+					};
+				}
+				return msg;
+			});
+			
+			console.log('Edit rejected and reverted successfully');
+		} catch (error) {
+			console.error('Failed to reject/revert edit:', error);
+		}
+	}
+
 	// Claude Code Modal functions
 	function handleClaudeCodeRequired(event: CustomEvent<{ authUrl: string; sessionId: string }>) {
 		claudeAuthUrl = event.detail.authUrl;
@@ -620,12 +1130,6 @@
 					if (result.configured) {
 			// Success - close modal and show success message
 			showClaudeCodeModal = false;
-			
-			// Stop any ongoing auth status checking
-			if (authStatusCheckInterval) {
-				clearInterval(authStatusCheckInterval);
-				authStatusCheckInterval = null;
-			}
 
 			// Add success message to AI chat
 			aiChatMessages = [
@@ -648,48 +1152,22 @@
 						timestamp: new Date()
 					}
 				];
-			} else {
-				// Still processing - show interim message and keep modal open
-				aiChatMessages = [
-					...aiChatMessages,
-					{
-						role: 'assistant',
-						content: `⏳ Verification code submitted successfully. Claude is processing your authentication - this may take up to 60 seconds...`,
-						timestamp: new Date()
-					}
-				];
 			}
 		} catch (error) {
 			console.error('Claude code verification error:', error);
 
 			const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 			
-			// For timeout or long-running authentication, don't show error - show progress message
-			if (errorMessage.includes('timeout') || errorMessage.includes('Authentication timeout') || errorMessage.includes('no response')) {
-				// Keep modal open and show waiting message - authentication may still be processing
-				aiChatMessages = [
-					...aiChatMessages,
-					{
-						role: 'assistant',
-						content: `⏳ Authentication is processing and may take up to 2 minutes. Please wait while we verify your code...`,
-						timestamp: new Date()
-					}
-				];
-
-				// Start periodic check for authentication completion
-				startAuthStatusCheck();
-			} else {
-				// Close modal and show error message for actual errors
-				showClaudeCodeModal = false;
-				aiChatMessages = [
-					...aiChatMessages,
-					{
-						role: 'assistant',
-						content: `❌ Verification failed: ${errorMessage}. Please try the setup process again.`,
-						timestamp: new Date()
-					}
-				];
-			}
+			// Close modal and show error message
+			showClaudeCodeModal = false;
+			aiChatMessages = [
+				...aiChatMessages,
+				{
+					role: 'assistant',
+					content: `❌ Verification failed: ${errorMessage}. Please try the setup process again.`,
+					timestamp: new Date()
+				}
+			];
 		} finally {
 			claudeCodeSubmitting = false;
 		}
@@ -699,78 +1177,9 @@
 		showClaudeCodeModal = false;
 		claudeAuthUrl = '';
 		claudeSessionId = '';
-		
-		// Stop any ongoing auth status checking
-		if (authStatusCheckInterval) {
-			clearInterval(authStatusCheckInterval);
-			authStatusCheckInterval = null;
-		}
 	}
 
-	let authStatusCheckInterval: NodeJS.Timeout | null = null;
 
-	function startAuthStatusCheck() {
-		// Clear any existing interval
-		if (authStatusCheckInterval) {
-			clearInterval(authStatusCheckInterval);
-		}
-
-		let checkCount = 0;
-		const maxChecks = 15; // Check for 2.5 more minutes (10s * 15 = 150s)
-
-		authStatusCheckInterval = setInterval(async () => {
-			checkCount++;
-			console.log(`Auth status check ${checkCount}/${maxChecks}: checking authentication status...`);
-
-			if (checkCount > maxChecks || !currentRepoName) {
-				clearInterval(authStatusCheckInterval!);
-				authStatusCheckInterval = null;
-
-				// Only show timeout if modal is still open (authentication hasn't completed)
-				if (showClaudeCodeModal) {
-					showClaudeCodeModal = false;
-					aiChatMessages = [
-						...aiChatMessages,
-						{
-							role: 'assistant',
-							content: `❌ Authentication timed out after waiting ${Math.floor(maxChecks * 10 / 60)} minutes. Please try the setup process again.`,
-							timestamp: new Date()
-						}
-					];
-				}
-				return;
-			}
-
-			try {
-				// Check if Claude is now configured by trying to send a simple status message
-				const userId = getCurrentUserId();
-				const result = await apiClient.sendClaudeMessage(currentRepoName, '/status', userId);
-
-				if (result && result.response && !result.response.includes('not configured') && !result.response.includes('not authenticated')) {
-					// Authentication successful!
-					clearInterval(authStatusCheckInterval!);
-					authStatusCheckInterval = null;
-					
-					// Only close modal and show success if not already handled
-					if (showClaudeCodeModal) {
-						showClaudeCodeModal = false;
-						aiChatMessages = [
-							...aiChatMessages,
-							{
-								role: 'assistant',
-								content: '🎉 Claude AI authentication completed successfully! You can now use AI assistance.',
-								timestamp: new Date()
-							}
-						];
-					}
-					console.log('✅ Authentication check successful - Claude is now configured');
-				}
-			} catch (error) {
-				// Still not ready, continue checking
-				console.log(`Auth status check ${checkCount}/${maxChecks}: still waiting...`);
-			}
-		}, 10000); // Check every 10 seconds
-	}
 
 	// Layout functions
 	function setLayoutMode(mode: 'both' | 'editor' | 'pdf') {
@@ -1154,7 +1563,7 @@
 
 	<!-- Main Editor Area -->
 	<div class="flex-1 flex flex-col overflow-hidden main-content-wrapper">
-		<div class="flex-1 flex overflow-hidden">
+		<div class="flex-1 flex overflow-hidden min-h-0">
 			<!-- File Tree + Git Sidebar -->
 			<aside
 				class="bg-dark-800 border-r border-gray-700 relative flex flex-col"
@@ -1401,11 +1810,11 @@
 			</aside>
 
 			<!-- Main Content Area (Editor + PDF) -->
-			<div class="flex-1 flex main-content-area" style="contain: layout style;">
+			<div class="flex-1 flex main-content-area min-h-0" style="contain: layout style;">
 				<!-- Editor -->
 				{#if layoutMode === 'editor' || layoutMode === 'both'}
 					<div
-						class="flex flex-col {layoutMode === 'both' ? '' : 'flex-1'}"
+						class="flex flex-col {layoutMode === 'both' ? '' : 'flex-1'} min-h-0"
 						style={layoutMode === 'both'
 							? `width: ${editorWidth}%; transform: translateZ(0); will-change: width;`
 							: 'transform: translateZ(0);'}
@@ -1419,7 +1828,7 @@
 							</div>
 						{/if}
 
-						<div class="flex-1">
+						<div class="flex-1 min-h-0">
 							<div bind:this={editorContainer} class="w-full h-full"></div>
 						</div>
 
@@ -1464,7 +1873,7 @@
 				<!-- PDF Preview -->
 				{#if layoutMode === 'pdf' || layoutMode === 'both'}
 					<div
-						class="flex flex-col border-l border-gray-700 {layoutMode === 'both' ? '' : 'flex-1'}"
+						class="flex flex-col border-l border-gray-700 {layoutMode === 'both' ? '' : 'flex-1'} min-h-0"
 						style={layoutMode === 'both'
 							? `width: ${100 - editorWidth}%; transform: translateZ(0); will-change: width;`
 							: 'transform: translateZ(0);'}
@@ -1508,6 +1917,8 @@
 									on:sendMessage={handleAiChatMessage}
 									on:clearMessages={handleClearAiChat}
 									on:claudeCodeRequired={handleClaudeCodeRequired}
+									on:applyEdit={handleApplyEdit}
+									on:rejectEdit={handleRejectEdit}
 								/>
 							</div>
 						{/if}
@@ -1527,3 +1938,110 @@
 	on:submit={handleClaudeCodeSubmit}
 	on:cancel={handleClaudeCodeCancel}
 />
+
+<style>
+	/* Monaco Editor Diff Decorations */
+	:global(.pending-edit-decoration) {
+		background-color: rgba(255, 152, 0, 0.1);
+		border: 1px solid rgba(255, 152, 0, 0.3);
+		border-radius: 2px;
+	}
+
+	:global(.pending-edit-line-decoration) {
+		background-color: rgba(255, 152, 0, 0.05);
+	}
+
+	:global(.pending-edit-margin) {
+		background-color: #ff9800;
+		width: 3px !important;
+		margin-left: 3px;
+	}
+
+	/* Content Widget Styles */
+	:global(.pending-edit-widget) {
+		z-index: 1000;
+		pointer-events: auto;
+	}
+
+	:global(.pending-edit-actions) {
+		background: rgba(31, 41, 55, 0.95);
+		border: 1px solid #4B5563;
+		border-radius: 6px;
+		padding: 8px 12px;
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+		backdrop-filter: blur(8px);
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: 12px;
+		white-space: nowrap;
+	}
+
+	:global(.pending-edit-actions .apply-btn) {
+		background: #10B981;
+		color: white;
+		border: none;
+		padding: 4px 8px;
+		border-radius: 4px;
+		cursor: pointer;
+		font-size: 11px;
+		font-weight: 500;
+		transition: background-color 0.2s;
+	}
+
+	:global(.pending-edit-actions .apply-btn:hover) {
+		background: #059669;
+	}
+
+	:global(.pending-edit-actions .reject-btn) {
+		background: #EF4444;
+		color: white;
+		border: none;
+		padding: 4px 8px;
+		border-radius: 4px;
+		cursor: pointer;
+		font-size: 11px;
+		font-weight: 500;
+		transition: background-color 0.2s;
+	}
+
+	:global(.pending-edit-actions .reject-btn:hover) {
+		background: #DC2626;
+	}
+
+	:global(.pending-edit-actions .edit-preview) {
+		color: #9CA3AF;
+		font-family: 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
+		font-size: 10px;
+		max-width: 200px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* Ensure proper cursor interaction */
+	:global(.monaco-editor .pending-edit-widget) {
+		pointer-events: auto !important;
+	}
+
+	/* Resizing performance optimizations */
+	:global(.resizing-editor-pdf) {
+		cursor: col-resize !important;
+	}
+
+	:global(.resizing-editor-pdf *) {
+		pointer-events: none !important;
+	}
+
+	/* Loading spinner */
+	:global(.loading-spinner) {
+		border: 2px solid rgba(255, 255, 255, 0.3);
+		border-radius: 50%;
+		border-top: 2px solid #ffffff;
+		animation: spin 1s linear infinite;
+	}
+
+	@keyframes spin {
+		0% { transform: rotate(0deg); }
+		100% { transform: rotate(360deg); }
+	}
+</style>

@@ -257,8 +257,16 @@ class ContainerService {
           "NotebookEdit",
           "WebFetch",
           "WebSearch",
-          "Write"
+          "Write",
+          "mcp__underleaf_permissions__permission_prompt",
+          "mcp__underleaf_permissions__wait_for_permission"
         ]
+      },
+      "mcpServers": {
+        "underleaf_permissions": {
+          "command": "node",
+          "args": ["/usr/local/bin/permission-prompt-server.js"]
+        }
       }
     };
 

@@ -2204,8 +2204,21 @@ app.post('/api/claude', async (req, res) => {
       const userContainerInfo = await containerService.getOrCreateUserContainer(userId, repoName);
       const container = docker.getContainer(userContainerInfo.containerId);
 
-      // Build Claude command with optional session resume
+      // Build Claude command with optional session resume and MCP configuration
       const claudeCmd = ['claude', '--print', '--verbose', '--output-format', 'stream-json'];
+      
+      // Add MCP configuration if .claude/settings.json exists
+      try {
+        const settingsExist = await containerService.checkClaudeSettings(userId, repoName);
+        if (settingsExist) {
+          claudeCmd.push('--mcp-config', '.claude/settings.json');
+          claudeCmd.push('--permission-prompt-tool', 'mcp__underleaf_permissions__permission_prompt');
+          console.log('🔧 Using MCP configuration with permission prompt tool');
+        }
+      } catch (error) {
+        console.warn('Failed to check Claude settings:', error);
+      }
+      
       if (existingSessionId) {
         claudeCmd.push('--resume', existingSessionId);
         console.log(`🔄 Resuming Claude session: ${existingSessionId}`);
@@ -2271,7 +2284,7 @@ app.post('/api/claude', async (req, res) => {
             
             try {
               const jsonData = JSON.parse(trimmedLine);
-              console.log('✅ Parsed JSON:', jsonData);
+              console.log('✅ Parsed JSON type:', jsonData.type, 'data:', jsonData);
               
               // Capture session ID for multi-turn conversations
               if (jsonData.session_id && !capturedSessionId) {
@@ -2292,7 +2305,7 @@ app.post('/api/claude', async (req, res) => {
                       break; // Only send the first text item to avoid duplicates
                     } else if (item.type === 'tool_use') {
                       // Handle tool use blocks
-                      console.log('🔧 Tool use detected:', item.name);
+                      console.log('🔧 Tool use detected:', item.name, 'with input:', item.input);
                       // Send structured tool call data that frontend can parse
                       const toolCallData = {
                         type: 'tool_call',
@@ -2300,21 +2313,25 @@ app.post('/api/claude', async (req, res) => {
                         id: item.id,
                         arguments: item.input || {}
                       };
-                      res.write(`\n__TOOL_CALL_START__${JSON.stringify(toolCallData)}__TOOL_CALL_END__\n`);
+                      const toolCallMessage = `\n__TOOL_CALL_START__${JSON.stringify(toolCallData)}__TOOL_CALL_END__\n`;
+                      console.log('📤 Sending tool call to frontend:', toolCallMessage);
+                      res.write(toolCallMessage);
                       hasStarted = true;
                     }
                   }
                 }
               } else if (jsonData.type === 'tool_use' && jsonData.name) {
                 // Direct tool use format
-                console.log('🔧 Direct tool use detected:', jsonData.name);
+                console.log('🔧 Direct tool use detected:', jsonData.name, 'with input:', jsonData.input);
                 const toolCallData = {
                   type: 'tool_call',
                   name: jsonData.name,
                   id: jsonData.id,
                   arguments: jsonData.input || {}
                 };
-                res.write(`\n__TOOL_CALL_START__${JSON.stringify(toolCallData)}__TOOL_CALL_END__\n`);
+                const toolCallMessage = `\n__TOOL_CALL_START__${JSON.stringify(toolCallData)}__TOOL_CALL_END__\n`;
+                console.log('📤 Sending direct tool call to frontend:', toolCallMessage);
+                res.write(toolCallMessage);
                 hasStarted = true;
               } else if (jsonData.type === 'result' && jsonData.result) {
                 // Result format - this is the final complete message, only send if no assistant message was sent
@@ -2464,6 +2481,180 @@ app.post('/api/claude', async (req, res) => {
     } catch (err) {
       console.error('Clear session error:', err);
       return res.status(500).json({ error: 'Failed to clear session' });
+    }
+  });
+
+  // Command execution endpoint
+  app.post('/api/execute-command', async (req, res) => {
+    try {
+      const { userId = 'anonymous', repoName, command } = req.body;
+      
+      if (!repoName || !command) {
+        return res.status(400).json({ error: 'repoName and command are required' });
+      }
+
+      // Check if repository volume exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      // Security: Prevent dangerous commands
+      const dangerousCommands = ['rm -rf /', 'sudo', 'passwd', 'su -', 'chmod 777', 'shutdown', 'reboot', 'mkfs', 'fdisk'];
+      const lowerCommand = command.toLowerCase();
+      if (dangerousCommands.some(dangerous => lowerCommand.includes(dangerous))) {
+        return res.status(403).json({ 
+          error: 'Command not allowed for security reasons',
+          command: command
+        });
+      }
+
+      try {
+        // Execute command in user container
+        const startTime = Date.now();
+        const { stdout, stderr } = await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['bash', '-c', command]
+        );
+        const duration = Date.now() - startTime;
+
+        console.log(`📋 Command executed: ${command} (${duration}ms)`);
+        
+        return res.json({
+          success: true,
+          command,
+          stdout: stdout || '',
+          stderr: stderr || '',
+          duration,
+          timestamp: new Date().toISOString()
+        });
+      } catch (containerError) {
+        console.error('Container command execution error:', containerError);
+        const errorMessage = containerError instanceof Error ? containerError.message : 'Unknown error';
+        
+        return res.json({
+          success: false,
+          command,
+          stdout: '',
+          stderr: errorMessage,
+          duration: 0,
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (err) {
+      console.error('Command execution endpoint error:', err);
+      return res.status(500).json({ error: 'Failed to execute command' });
+    }
+  });
+
+  // Permission prompt endpoints
+  
+  // Get pending permission prompts
+  app.get('/api/claude/permissions/:userId/:repoName', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      
+      // Check if repository volume exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      try {
+        // Read permission prompts from the container
+        const { stdout } = await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['sh', '-c', 'ls /tmp/claude-comm/permission_*.json 2>/dev/null || echo ""']
+        );
+
+        const prompts = [];
+        if (stdout.trim()) {
+          const files = stdout.trim().split('\n');
+          for (const file of files) {
+            if (file.trim()) {
+              try {
+                const { stdout: content } = await containerService.executeInUserContainer(
+                  userId,
+                  repoName,
+                  ['cat', file]
+                );
+                const promptData = JSON.parse(content);
+                prompts.push(promptData);
+              } catch (error) {
+                console.warn('Failed to read permission prompt file:', file, error);
+              }
+            }
+          }
+        }
+
+        return res.json({ prompts });
+      } catch (containerError) {
+        console.error('Container permission prompts check error:', containerError);
+        return res.status(500).json({ error: 'Failed to check permission prompts in container' });
+      }
+    } catch (err) {
+      console.error('Permission prompts endpoint error:', err);
+      return res.status(500).json({ error: 'Failed to get permission prompts' });
+    }
+  });
+
+  // Respond to a permission prompt
+  app.post('/api/claude/permissions/:userId/:repoName/respond', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      const { promptId, approved, reason } = req.body;
+      
+      if (!promptId || typeof approved !== 'boolean') {
+        return res.status(400).json({ error: 'promptId and approved (boolean) are required' });
+      }
+
+      // Check if repository volume exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      try {
+        // Create response data
+        const responseData = {
+          promptId,
+          approved,
+          reason: reason || '',
+          timestamp: new Date().toISOString(),
+        };
+
+        // Write response to container
+        const responseJson = JSON.stringify(responseData, null, 2);
+        await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['sh', '-c', `mkdir -p /tmp/claude-comm && cat > /tmp/claude-comm/response_${promptId}.json << 'EOF'\n${responseJson}\nEOF`]
+        );
+
+        // Remove the original prompt file
+        await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['rm', '-f', `/tmp/claude-comm/permission_${promptId}.json`]
+        ).catch(() => {}); // Ignore errors if file doesn't exist
+
+        console.log(`📝 Permission response recorded: ${promptId} - ${approved ? 'APPROVED' : 'DENIED'}`);
+        
+        return res.json({ 
+          message: 'Permission response recorded',
+          promptId,
+          approved,
+          reason 
+        });
+      } catch (containerError) {
+        console.error('Container permission response error:', containerError);
+        return res.status(500).json({ error: 'Failed to record permission response in container' });
+      }
+    } catch (err) {
+      console.error('Permission response endpoint error:', err);
+      return res.status(500).json({ error: 'Failed to record permission response' });
     }
   });
 

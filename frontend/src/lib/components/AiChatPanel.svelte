@@ -2,6 +2,7 @@
 	import { createEventDispatcher } from 'svelte';
 	import { apiClient } from '$utils/api';
 	import { marked } from 'marked';
+	import PermissionPrompt from './PermissionPrompt.svelte';
 
 	export let isVisible = false;
 	export let height = 300; // Default height in pixels
@@ -12,7 +13,7 @@
 		contentBlocks?: Array<{ 
 			type: 'text' | 'tool_call'; 
 			content?: string; 
-			toolCall?: { name: string; id: string; arguments: any; expanded?: boolean };
+			toolCall?: { name: string; id: string; arguments: any; expanded?: boolean; editDiff?: any };
 		}>;
 	}> = [];
 	export let isLoading = false;
@@ -44,6 +45,8 @@
 		sendMessage: string;
 		clearMessages: void;
 		claudeCodeRequired: { authUrl: string; sessionId: string; };
+		applyEdit: { messageIndex: number; blockIndex: number; editDiff: any };
+		rejectEdit: { messageIndex: number; blockIndex: number };
 	}>();
 
 	let currentMessage = '';
@@ -53,14 +56,102 @@
 	let setupResultMessage = '';
 	let setupInstructions: string[] = [];
 
-	function handleSendMessage() {
+	// Permission prompt state
+	let permissionPrompts: Array<{
+		id: string;
+		message: string;
+		action: string;
+		details: Record<string, any>;
+		severity: 'low' | 'medium' | 'high';
+		timestamp: string;
+		status: string;
+	}> = [];
+	let permissionPromptInterval: NodeJS.Timeout | null = null;
+
+	async function handleSendMessage() {
 		if (!currentMessage.trim() || isLoading) return;
 
 		const userMessage = currentMessage.trim();
 		currentMessage = '';
 		
-		// Dispatch the message to parent component
-		dispatch('sendMessage', userMessage);
+		// Check if this is a command execution request
+		if (userMessage.startsWith('/cmd ')) {
+			const command = userMessage.slice(5); // Remove '/cmd ' prefix
+			await executeCommand(command);
+		} else {
+			// Dispatch the message to parent component for AI processing
+			dispatch('sendMessage', userMessage);
+		}
+	}
+
+	async function executeCommand(command: string) {
+		if (!command.trim() || !repoName) return;
+
+		// Add user message to chat
+		messages = [
+			...messages,
+			{
+				role: 'user',
+				content: `/cmd ${command}`,
+				timestamp: new Date()
+			}
+		];
+
+		// Set loading state
+		isLoading = true;
+
+		try {
+			const result = await apiClient.executeCommand(repoName, command, userId);
+			
+			// Format the command output
+			let outputContent = `**Command:** \`${result.command}\`\n**Duration:** ${result.duration}ms\n\n`;
+			
+			if (result.success) {
+				if (result.stdout) {
+					outputContent += `**Output:**\n\`\`\`\n${result.stdout}\n\`\`\`\n`;
+				}
+				if (result.stderr) {
+					outputContent += `**Warnings/Errors:**\n\`\`\`\n${result.stderr}\n\`\`\`\n`;
+				}
+				if (!result.stdout && !result.stderr) {
+					outputContent += `**Result:** Command completed successfully with no output.\n`;
+				}
+			} else {
+				outputContent += `**Error:** ${result.stderr || result.error || 'Command failed'}\n\`\`\`\n${result.stderr}\n\`\`\`\n`;
+			}
+
+			// Add command result to chat
+			messages = [
+				...messages,
+				{
+					role: 'assistant',
+					content: outputContent,
+					timestamp: new Date(),
+					contentBlocks: [{
+						type: 'text',
+						content: outputContent
+					}]
+				}
+			];
+		} catch (error) {
+			console.error('Command execution error:', error);
+			
+			// Add error message to chat
+			messages = [
+				...messages,
+				{
+					role: 'assistant',
+					content: `**Command Failed:** \`${command}\`\n\n**Error:** ${error instanceof Error ? error.message : 'Unknown error occurred'}`,
+					timestamp: new Date(),
+					contentBlocks: [{
+						type: 'text',
+						content: `**Command Failed:** \`${command}\`\n\n**Error:** ${error instanceof Error ? error.message : 'Unknown error occurred'}`
+					}]
+				}
+			];
+		} finally {
+			isLoading = false;
+		}
 	}
 
 	function handleKeyDown(event: KeyboardEvent) {
@@ -124,6 +215,19 @@
 		});
 	}
 
+	function handleApplyEdit(messageIndex: number, blockIndex: number, editDiff: any) {
+		dispatch('applyEdit', { messageIndex, blockIndex, editDiff });
+		
+		// Note: The main editor component will update the message state with full tracking info
+		// including originalContent for revert functionality, so we don't update here
+	}
+
+	function handleRejectEdit(messageIndex: number, blockIndex: number) {
+		dispatch('rejectEdit', { messageIndex, blockIndex });
+		
+		// Note: The main editor component will handle the state update and potential revert
+	}
+
 	// Handle height changes
 	function onHeightChange(newHeight: number) {
 		height = Math.max(200, Math.min(600, newHeight));
@@ -179,6 +283,55 @@
 		}
 	}
 
+	// Permission prompt functions
+	async function checkPermissionPrompts() {
+		if (!repoName || !isVisible) return;
+		
+		try {
+			const result = await apiClient.getPermissionPrompts(repoName, userId);
+			permissionPrompts = result.prompts;
+		} catch (error) {
+			console.warn('Failed to check permission prompts:', error);
+		}
+	}
+
+	async function handlePermissionApprove(event: CustomEvent<{ promptId: string; reason?: string }>) {
+		const { promptId, reason } = event.detail;
+		
+		try {
+			await apiClient.respondToPermissionPrompt(repoName, promptId, true, reason, userId);
+			// Remove from local state
+			permissionPrompts = permissionPrompts.filter(p => p.id !== promptId);
+		} catch (error) {
+			console.error('Failed to approve permission:', error);
+		}
+	}
+
+	async function handlePermissionDeny(event: CustomEvent<{ promptId: string; reason?: string }>) {
+		const { promptId, reason } = event.detail;
+		
+		try {
+			await apiClient.respondToPermissionPrompt(repoName, promptId, false, reason, userId);
+			// Remove from local state
+			permissionPrompts = permissionPrompts.filter(p => p.id !== promptId);
+		} catch (error) {
+			console.error('Failed to deny permission:', error);
+		}
+	}
+
+	// Start/stop permission prompt polling based on visibility
+	$: if (isVisible && repoName) {
+		if (!permissionPromptInterval) {
+			checkPermissionPrompts();
+			permissionPromptInterval = setInterval(checkPermissionPrompts, 3000); // Check every 3 seconds
+		}
+	} else {
+		if (permissionPromptInterval) {
+			clearInterval(permissionPromptInterval);
+			permissionPromptInterval = null;
+		}
+	}
+
 	// Smart auto-scroll logic
 	let lastMessageCount = 0;
 	let shouldAutoScroll = true;
@@ -202,10 +355,20 @@
 	}
 
 	// Cleanup on component destroy
-	import { onDestroy } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
+	
+	// Initialize permission prompt checking on mount
+	onMount(() => {
+		if (isVisible && repoName) {
+			checkPermissionPrompts();
+		}
+	});
 	onDestroy(() => {
 		if (typingInterval) {
 			clearInterval(typingInterval);
+		}
+		if (permissionPromptInterval) {
+			clearInterval(permissionPromptInterval);
 		}
 	});
 </script>
@@ -258,6 +421,25 @@
 
 		<!-- Messages Area -->
 		<div bind:this={messagesContainer} on:scroll={checkScrollPosition} class="flex-1 overflow-y-auto p-4 space-y-3 min-h-0 ai-chat-messages">
+			<!-- Permission Prompts -->
+			{#if permissionPrompts.length > 0}
+				<div class="permission-prompts-section mb-4">
+					<h4 class="text-sm font-medium text-yellow-400 mb-3 flex items-center space-x-2">
+						<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+						</svg>
+						<span>Permission Required</span>
+						<span class="text-xs bg-yellow-600 text-white px-2 py-0.5 rounded-full">{permissionPrompts.length}</span>
+					</h4>
+					{#each permissionPrompts as prompt}
+						<PermissionPrompt 
+							{prompt} 
+							on:approve={handlePermissionApprove}
+							on:deny={handlePermissionDeny}
+						/>
+					{/each}
+				</div>
+			{/if}
 			{#if showSetupResult}
 				<div class="bg-blue-900/50 border border-blue-600 rounded-lg p-4 mb-4">
 					<div class="flex items-start space-x-3">
@@ -333,6 +515,9 @@
 													<div class="flex items-center space-x-2">
 														<span class="text-orange-400">🔧</span>
 														<span class="text-sm font-medium text-gray-200">Tool Call: {block.toolCall.name}</span>
+														{#if block.toolCall.editDiff}
+															<span class="text-xs px-2 py-1 bg-blue-600 text-blue-100 rounded">Edit</span>
+														{/if}
 													</div>
 													<svg 
 														class="w-4 h-4 text-gray-400 transition-transform {block.toolCall.expanded ? 'rotate-180' : ''}" 
@@ -345,6 +530,73 @@
 												</button>
 												{#if block.toolCall.expanded}
 													<div class="px-3 py-2 bg-gray-800 border-t border-gray-600">
+														{#if block.toolCall.editDiff}
+															<!-- Diff viewer for Edit tool calls -->
+															<div class="mb-3">
+																<div class="flex items-center justify-between mb-2">
+																	<div class="text-xs text-gray-400">File: {block.toolCall.editDiff.filePath}</div>
+																	<div class="flex space-x-2">
+																		{#if block.toolCall.editDiff.inEditor}
+																			<span class="px-2 py-1 bg-blue-600 text-white text-xs rounded">In Editor</span>
+																		{:else if block.toolCall.editDiff.applied && !block.toolCall.editDiff.rejected}
+																			<!-- Applied but not rejected - show revert option -->
+																			<span class="px-2 py-1 bg-green-600 text-white text-xs rounded mr-2">Applied</span>
+																			<button
+																				on:click={() => handleRejectEdit(index, blockIndex)}
+																				class="px-2 py-1 bg-orange-600 hover:bg-orange-700 text-white text-xs rounded transition-colors"
+																				title="Revert this change"
+																			>
+																				Revert
+																			</button>
+																		{:else if block.toolCall.editDiff.rejected}
+																			<!-- Rejected (and reverted if was applied) -->
+																			<span class="px-2 py-1 bg-red-600 text-white text-xs rounded">
+																				{block.toolCall.editDiff.applied ? 'Reverted' : 'Rejected'}
+																			</span>
+																		{:else}
+																			<!-- Not applied yet - show apply/reject options -->
+																			<button
+																				on:click={() => handleApplyEdit(index, blockIndex, block.toolCall?.editDiff)}
+																				class="px-2 py-1 bg-green-600 hover:bg-green-700 text-white text-xs rounded transition-colors mr-2"
+																			>
+																				Apply
+																			</button>
+																			<button
+																				on:click={() => handleRejectEdit(index, blockIndex)}
+																				class="px-2 py-1 bg-red-600 hover:bg-red-700 text-white text-xs rounded transition-colors"
+																			>
+																				Reject
+																			</button>
+																		{/if}
+																	</div>
+																</div>
+																
+																{#if !block.toolCall.editDiff.inEditor && block.toolCall.editDiff.diff}
+																	<!-- Show diff only for files not currently open in editor -->
+																	<div class="bg-gray-900 rounded border font-mono text-xs">
+																		{#each block.toolCall.editDiff.diff as diffLine, diffIndex}
+																			<div class="flex">
+																				<div class="w-8 text-right pr-2 text-gray-500 border-r border-gray-600 bg-gray-800">
+																					{diffLine.lineNumber}
+																				</div>
+																				<div class="flex-1 pl-2 py-0.5 {diffLine.type === 'addition' ? 'bg-green-900 text-green-100' : diffLine.type === 'deletion' ? 'bg-red-900 text-red-100' : 'text-gray-300'}">
+																					<span class="mr-1">
+																						{#if diffLine.type === 'addition'}+{:else if diffLine.type === 'deletion'}-{:else}&nbsp;{/if}
+																					</span>
+																					{diffLine.line}
+																				</div>
+																			</div>
+																		{/each}
+																	</div>
+																{:else if block.toolCall.editDiff.inEditor}
+																	<div class="text-xs text-blue-300 bg-blue-900/20 rounded p-2">
+																		💡 This change is displayed directly in the editor with apply/reject buttons. Check the currently open file.
+																	</div>
+																{/if}
+															</div>
+														{/if}
+														
+														<!-- Regular arguments display -->
 														<div class="text-xs text-gray-400 mb-1">Arguments:</div>
 														<pre class="text-xs text-gray-300 overflow-x-auto whitespace-pre-wrap break-words">{JSON.stringify(block.toolCall.arguments, null, 2)}</pre>
 													</div>
@@ -392,7 +644,7 @@
 				<textarea
 					bind:value={currentMessage}
 					on:keydown={handleKeyDown}
-					placeholder="Ask the AI assistant anything..."
+					placeholder="Ask the AI assistant anything... (use '/cmd <command>' to run shell commands)"
 					class="flex-1 bg-dark-700 border border-gray-600 rounded px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 resize-none text-sm"
 					rows="2"
 					disabled={isLoading}
@@ -409,7 +661,10 @@
 					</svg>
 				</button>
 			</div>
-			<p class="text-xs text-gray-500 mt-2">Press Enter to send, Shift+Enter for new line</p>
+			<div class="flex justify-between items-center mt-2">
+				<p class="text-xs text-gray-500">Press Enter to send, Shift+Enter for new line</p>
+				<p class="text-xs text-gray-500">💡 Type <code class="bg-gray-700 px-1 rounded">/cmd ls</code> to run commands directly</p>
+			</div>
 		</div>
 	</div>
 {/if}
