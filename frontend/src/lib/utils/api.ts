@@ -366,6 +366,63 @@ class ApiClient {
 		});
 	}
 
+	async debugClaudeConfiguration(
+		repoName: string,
+		userId = 'anonymous'
+	): Promise<{
+		settingsExists: boolean;
+		settingsContent: any;
+		mcpServerExists: boolean;
+		nodeInstalled: boolean | string;
+		claudeVersion: string;
+		workdir: string;
+	}> {
+		return this.request(`/api/claude/debug/${userId}/${repoName}`, {
+			method: 'GET'
+		});
+	}
+
+	async getProjectSettings(
+		repoName: string,
+		userId = 'anonymous'
+	): Promise<{
+		mainDocument: string | null;
+		compileOptions: {
+			engine: string;
+			outputDirectory: string;
+		};
+		version: string;
+	}> {
+		return this.request(`/api/project/${userId}/${repoName}/settings`, {
+			method: 'GET'
+		});
+	}
+
+	async saveProjectSettings(
+		repoName: string,
+		settings: any,
+		userId = 'anonymous'
+	): Promise<{
+		message: string;
+		settings: any;
+	}> {
+		return this.request(`/api/project/${userId}/${repoName}/settings`, {
+			method: 'PUT',
+			body: JSON.stringify(settings)
+		});
+	}
+
+	async detectMainDocument(
+		repoName: string,
+		userId = 'anonymous'
+	): Promise<{
+		mainDocument: string | null;
+	}> {
+		return this.request(`/api/project/${userId}/${repoName}/detect-main`, {
+			method: 'GET'
+		});
+	}
+
 	async ensureUserContainer(
 		repoName: string,
 		userId: string

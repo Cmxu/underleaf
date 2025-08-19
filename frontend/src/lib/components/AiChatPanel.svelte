@@ -277,6 +277,53 @@
 		}
 	}
 
+	async function debugClaudeConfig() {
+		if (!repoName) return;
+
+		try {
+			const debugInfo = await apiClient.debugClaudeConfiguration(repoName, userId);
+			
+			// Add debug info to chat
+			let debugContent = `**Claude Configuration Debug Info:**\n\n`;
+			debugContent += `**Settings file exists:** ${debugInfo.settingsExists}\n`;
+			debugContent += `**MCP server file exists:** ${debugInfo.mcpServerExists}\n`;
+			debugContent += `**Node.js installed:** ${debugInfo.nodeInstalled}\n`;
+			debugContent += `**Claude version:** ${debugInfo.claudeVersion}\n`;
+			debugContent += `**Working directory:** ${debugInfo.workdir}\n\n`;
+			
+			if (debugInfo.settingsContent) {
+				debugContent += `**Settings content:**\n\`\`\`json\n${JSON.stringify(debugInfo.settingsContent, null, 2)}\n\`\`\`\n`;
+			}
+
+			messages = [
+				...messages,
+				{
+					role: 'assistant',
+					content: debugContent,
+					timestamp: new Date(),
+					contentBlocks: [{
+						type: 'text',
+						content: debugContent
+					}]
+				}
+			];
+		} catch (error) {
+			console.error('Debug configuration error:', error);
+			messages = [
+				...messages,
+				{
+					role: 'assistant',
+					content: `**Debug Error:** ${error instanceof Error ? error.message : 'Unknown error'}`,
+					timestamp: new Date(),
+					contentBlocks: [{
+						type: 'text',
+						content: `**Debug Error:** ${error instanceof Error ? error.message : 'Unknown error'}`
+					}]
+				}
+			];
+		}
+	}
+
 	function openAuthUrl() {
 		if (authUrl) {
 			window.open(authUrl, '_blank');
@@ -389,6 +436,16 @@
 			</div>
 			
 			<div class="flex items-center space-x-2">
+				<button
+					on:click={debugClaudeConfig}
+					class="text-gray-400 hover:text-white transition-colors text-xs px-2 py-1 rounded hover:bg-gray-600"
+					title="Debug Claude Configuration"
+					aria-label="Debug Claude Configuration"
+				>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+					</svg>
+				</button>
 				<button
 					on:click={startClaudeSetup}
 					disabled={setupLoading}

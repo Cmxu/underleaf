@@ -247,7 +247,24 @@ class ContainerService {
    * Create .claude/settings.json file in the repository
    */
   async createClaudeSettings(userId: string, repoName: string): Promise<void> {
-    const settingsContent = {
+    // First, try to create a basic configuration without MCP to avoid startup errors
+    const basicSettingsContent = {
+      "includeCoAuthoredBy": false,
+      "permissions": {
+        "allow": [
+          "Bash",
+          "Edit",
+          "MultiEdit",
+          "NotebookEdit",
+          "WebFetch",
+          "WebSearch",
+          "Write"
+        ]
+      }
+    };
+
+    // Advanced configuration with MCP (only if MCP server is available)
+    const advancedSettingsContent = {
       "includeCoAuthoredBy": false,
       "permissions": {
         "allow": [
@@ -259,16 +276,40 @@ class ContainerService {
           "WebSearch",
           "Write",
           "mcp__underleaf_permissions__permission_prompt",
-          "mcp__underleaf_permissions__wait_for_permission"
+          "mcp__underleaf_permissions__wait_for_permission",
+          "mcp__latex_compile__compile_latex",
+          "mcp__latex_compile__check_latex_syntax",
+          "mcp__latex_compile__get_latex_log",
+          "mcp__latex_compile__clean_latex_build"
         ]
       },
       "mcpServers": {
         "underleaf_permissions": {
           "command": "node",
           "args": ["/usr/local/bin/permission-prompt-server.js"]
+        },
+        "latex_compile": {
+          "command": "node",
+          "args": ["/usr/local/bin/latex-compile-server.js"]
         }
       }
     };
+
+    // Check if MCP dependencies are available
+    let useMcp = false;
+    try {
+      // Check if MCP server files exist
+      await this.executeInUserContainer(userId, repoName, ['test', '-f', '/usr/local/bin/permission-prompt-server.js']);
+      await this.executeInUserContainer(userId, repoName, ['test', '-f', '/usr/local/bin/latex-compile-server.js']);
+      // Check if node is available
+      await this.executeInUserContainer(userId, repoName, ['which', 'node']);
+      useMcp = true;
+      console.log(`MCP dependencies available for ${userId}/${repoName}, using advanced configuration`);
+    } catch (error) {
+      console.log(`MCP dependencies not available for ${userId}/${repoName}, using basic configuration:`, error);
+    }
+
+    const settingsContent = useMcp ? advancedSettingsContent : basicSettingsContent;
 
     try {
       // Create .claude directory
@@ -294,6 +335,131 @@ class ContainerService {
       return true;
     } catch (error) {
       return false;
+    }
+  }
+
+  /**
+   * Get project settings for a repository
+   */
+  async getProjectSettings(userId: string, repoName: string): Promise<any> {
+    try {
+      // Check if settings file exists
+      await this.executeInUserContainer(userId, repoName, ['test', '-f', '.underleaf/settings.json']);
+      
+      // Read existing settings
+      const { stdout: content } = await this.executeInUserContainer(
+        userId, repoName, ['cat', '.underleaf/settings.json']
+      );
+      
+      return JSON.parse(content);
+    } catch (error) {
+      // Return default settings if file doesn't exist
+      return {
+        mainDocument: await this.detectMainDocument(userId, repoName),
+        compileOptions: {
+          engine: 'pdflatex',
+          outputDirectory: 'build'
+        },
+        version: '1.0'
+      };
+    }
+  }
+
+  /**
+   * Save project settings for a repository
+   */
+  async saveProjectSettings(userId: string, repoName: string, settings: any): Promise<void> {
+    try {
+      // Create .underleaf directory
+      await this.executeInUserContainer(userId, repoName, ['mkdir', '-p', '.underleaf']);
+      
+      // Save settings file
+      const settingsJson = JSON.stringify(settings, null, 2);
+      await this.executeInUserContainer(userId, repoName, ['sh', '-c', `cat > .underleaf/settings.json << 'EOF'\n${settingsJson}\nEOF`]);
+      
+      console.log(`Saved project settings for ${userId}/${repoName}`);
+    } catch (error) {
+      console.error(`Failed to save project settings for ${userId}/${repoName}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Auto-detect the main document in a repository
+   */
+  async detectMainDocument(userId: string, repoName: string): Promise<string | null> {
+    const commonMainFiles = [
+      'main.tex',
+      'paper.tex',
+      'document.tex',
+      'thesis.tex',
+      'report.tex',
+      'article.tex',
+      'book.tex',
+      'index.tex'
+    ];
+
+    try {
+      // Check for common main file names
+      for (const filename of commonMainFiles) {
+        try {
+          await this.executeInUserContainer(userId, repoName, ['test', '-f', filename]);
+          console.log(`Detected main document: ${filename}`);
+          return filename;
+        } catch (error) {
+          // File doesn't exist, continue checking
+        }
+      }
+
+      // If no common names found, look for .tex files with \documentclass
+      try {
+        const { stdout: texFiles } = await this.executeInUserContainer(
+          userId, repoName, ['find', '.', '-name', '*.tex', '-type', 'f']
+        );
+
+        if (texFiles.trim()) {
+          const files = texFiles.trim().split('\n');
+          
+          for (const file of files) {
+            if (file.trim()) {
+              try {
+                // Check if file contains \documentclass (indicates it's a main document)
+                await this.executeInUserContainer(
+                  userId, repoName, ['grep', '-l', '\\documentclass', file.trim()]
+                );
+                
+                                 const mainFile = file.replace(/^\.\//, ''); // Remove ./ prefix
+                console.log(`Detected main document with \\documentclass: ${mainFile}`);
+                return mainFile;
+              } catch (error) {
+                // File doesn't contain \documentclass, continue checking
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.log('No .tex files found for main document detection');
+      }
+
+      // Fallback: return the first .tex file found
+      try {
+        const { stdout: firstTex } = await this.executeInUserContainer(
+          userId, repoName, ['find', '.', '-name', '*.tex', '-type', 'f', '|', 'head', '-1']
+        );
+        
+        if (firstTex.trim()) {
+                     const mainFile = firstTex.trim().replace(/^\.\//, '');
+          console.log(`Fallback main document: ${mainFile}`);
+          return mainFile;
+        }
+      } catch (error) {
+        console.log('No .tex files found in repository');
+      }
+
+      return null;
+    } catch (error) {
+      console.error(`Failed to detect main document for ${userId}/${repoName}:`, error);
+      return null;
     }
   }
 

@@ -27,9 +27,11 @@ RUN npm install -g @anthropic-ai/claude-code
 # Install MCP SDK for permission prompt server
 RUN npm install -g @modelcontextprotocol/sdk
 
-# Copy permission prompt server
+# Copy MCP servers
 COPY permission-prompt-server.js /usr/local/bin/permission-prompt-server.js
+COPY latex-compile-server.js /usr/local/bin/latex-compile-server.js
 RUN chmod +x /usr/local/bin/permission-prompt-server.js
+RUN chmod +x /usr/local/bin/latex-compile-server.js
 
 # Verify installation
 RUN claude --version || echo "Claude CLI installed but may need configuration"

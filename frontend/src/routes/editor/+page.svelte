@@ -5,6 +5,7 @@
 	import PdfPreview from '$components/PdfPreview.svelte';
 	import AiChatPanel from '$components/AiChatPanel.svelte';
 	import ClaudeCodeModal from '$components/ClaudeCodeModal.svelte';
+	import ProjectSettingsModal from '$components/ProjectSettingsModal.svelte';
 	import { apiClient } from '$lib/utils/api';
 	import { authStore } from '$lib/stores/auth';
 	import type { GitStatusResponse } from '$lib/types/api';
@@ -68,26 +69,36 @@
 	}
 
 	// Function to detect if a tool call is an Edit and create in-editor diff
-	function processEditToolCall(toolCall: { name: string; arguments: any; id: string }) {
+	function processEditToolCall(toolCall: { name: string; arguments: any; id?: string }) {
 		console.log('🔍 Processing tool call:', toolCall);
 		
 		if (toolCall.name === 'Edit' && toolCall.arguments.file_path && toolCall.arguments.old_string && toolCall.arguments.new_string) {
 			console.log('✅ Edit tool call detected!', {
 				file_path: toolCall.arguments.file_path,
-				old_string: toolCall.arguments.old_string?.substring(0, 100) + '...',
-				new_string: toolCall.arguments.new_string?.substring(0, 100) + '...'
+				old_string: toolCall.arguments.old_string?.substring(0, 50) + '...',
+				new_string: toolCall.arguments.new_string?.substring(0, 50) + '...',
+				current_file: currentFilePath,
+				has_editor: !!monacoEditor
 			});
 			
 			try {
 				// Check if this edit is for the currently open file
 				if (currentFilePath && toolCall.arguments.file_path === currentFilePath && monacoEditor) {
+					console.log('🎯 Processing edit for currently open file:', currentFilePath);
 					const currentContent = monacoEditor.getValue();
 					const range = findChangeRange(currentContent, toolCall.arguments.old_string, toolCall.arguments.new_string);
 					
+					console.log('📍 Found range:', range);
+					
 					if (range) {
+						// Generate a unique ID if not provided
+						const editId = toolCall.id || `edit_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+						
+						console.log('➕ Adding pending edit with ID:', editId);
+						
 						// Add to pending edits for in-editor display
 						addPendingEdit({
-							id: toolCall.id,
+							id: editId,
 							range,
 							oldString: toolCall.arguments.old_string,
 							newString: toolCall.arguments.new_string,
@@ -105,7 +116,15 @@
 							applied: false,
 							inEditor: true
 						};
+					} else {
+						console.log('⚠️ Could not find range for edit in current file');
 					}
+				} else {
+					console.log('ℹ️ Edit is for different file or editor not available:', {
+						editFile: toolCall.arguments.file_path,
+						currentFile: currentFilePath,
+						hasEditor: !!monacoEditor
+					});
 				}
 				
 				// Fallback for other files or when range not found
@@ -120,7 +139,7 @@
 					inEditor: false
 				};
 				
-				console.log('🎯 Created edit diff:', result);
+				console.log('🎯 Created fallback edit diff:', result);
 				return result;
 			} catch (error) {
 				console.error('Error processing edit tool call:', error);
@@ -139,15 +158,40 @@
 
 	// Functions for managing in-editor diffs
 	function addPendingEdit(edit: any) {
-		pendingEdits = [...pendingEdits, edit];
-		updateEditorDecorations();
+		console.log('📝 Adding pending edit for file:', edit.filePath || currentFilePath);
+		
+		const filePath = edit.filePath || currentFilePath;
+		if (!filePath) {
+			console.error('❌ Cannot add edit without file path');
+			return;
+		}
+		
+		// Add to global pending edits
+		const fileEdits = globalPendingEdits.get(filePath) || [];
+		const editWithFilePath = { ...edit, filePath };
+		globalPendingEdits.set(filePath, [...fileEdits, editWithFilePath]);
+		
+		// If this edit is for the currently open file, also add to local pending edits
+		if (filePath === currentFilePath) {
+			pendingEdits = [...pendingEdits, edit];
+			updateEditorDecorations();
+		}
+		
+		console.log('📝 Global pending edits:', globalPendingEdits.size, 'files affected');
+		console.log('📝 Current file pending edits:', pendingEdits.length);
 	}
 
 	function updateEditorDecorations() {
-		if (!monacoEditor || !monaco) return;
+		console.log('🎨 Updating editor decorations, pending edits:', pendingEdits.length);
+		
+		if (!monacoEditor || !monaco) {
+			console.log('⚠️ No monaco editor or monaco instance available');
+			return;
+		}
 
 		// Clear existing decorations
 		if (editorDecorations.length > 0) {
+			console.log('🧹 Clearing existing decorations:', editorDecorations.length);
 			monacoEditor.deltaDecorations(editorDecorations, []);
 			editorDecorations = [];
 		}
@@ -156,13 +200,15 @@
 		const decorations: any[] = [];
 		
 		pendingEdits.forEach((edit, index) => {
+			console.log(`🎯 Processing edit ${index + 1}:`, edit);
+			
 			if (!edit.applied) {
-				// Highlight the range that will be changed
+				// Highlight the range that will be changed with stronger visual indicators
 				decorations.push({
 					range: new monaco.Range(edit.range.startLine, edit.range.startColumn, edit.range.endLine, edit.range.endColumn),
 					options: {
 						className: 'pending-edit-decoration',
-						hoverMessage: { value: `**Pending Change ${index + 1}**\n\nOld: \`${edit.oldString}\`\n\nNew: \`${edit.newString}\`` },
+						hoverMessage: { value: `**Pending Change ${index + 1}**\n\nCurrent: \`${edit.oldString}\`\n\nProposed: \`${edit.newString}\`\n\nClick Apply/Reject buttons above this line.` },
 						minimap: {
 							color: '#ff9800',
 							position: monaco.editor.MinimapPosition.Inline
@@ -170,7 +216,9 @@
 						overviewRuler: {
 							color: '#ff9800',
 							position: monaco.editor.OverviewRulerLane.Right
-						}
+						},
+						glyphMarginClassName: 'pending-edit-glyph',
+						glyphMarginHoverMessage: { value: 'Pending AI Edit' }
 					}
 				});
 
@@ -185,23 +233,54 @@
 						}
 					});
 				}
+
+				// Add an overlay decoration to show the proposed change
+				decorations.push({
+					range: new monaco.Range(edit.range.startLine, edit.range.startColumn, edit.range.endLine, edit.range.endColumn),
+					options: {
+						afterContentClassName: 'pending-edit-after-content',
+						after: {
+							content: ` → ${edit.newString}`,
+							color: '#4ade80',
+							fontStyle: 'italic'
+						}
+					}
+				});
 			}
 		});
 
+		console.log('🎨 Created decorations:', decorations.length);
+
 		if (decorations.length > 0) {
 			editorDecorations = monacoEditor.deltaDecorations([], decorations);
+			console.log('✅ Applied decorations:', editorDecorations.length);
 		}
 
 		// Add content widgets for action buttons
 		addActionWidgets();
+		
+		// Force a visual refresh
+		setTimeout(() => {
+			if (monacoEditor) {
+				monacoEditor.revealLineInCenter(pendingEdits[0]?.range?.startLine || 1);
+			}
+		}, 100);
 	}
 
 	function addActionWidgets() {
-		if (!monacoEditor || !monaco) return;
+		console.log('🪄 Adding action widgets for pending edits:', pendingEdits.length);
+		
+		if (!monacoEditor || !monaco) {
+			console.log('⚠️ No monaco editor or monaco instance available for widgets');
+			return;
+		}
 
 		pendingEdits.forEach((edit, index) => {
+			console.log(`🪄 Processing widget for edit ${index + 1}:`, { applied: edit.applied, hasWidget: !!edit.widgetId });
+			
 			if (!edit.applied && !edit.widgetId) {
 				const widgetId = `pending-edit-widget-${edit.id}`;
+				console.log('🪄 Creating widget with ID:', widgetId);
 				
 				const widget = {
 					getId: () => widgetId,
@@ -220,9 +299,16 @@
 						const applyBtn = domNode.querySelector('.apply-btn');
 						const rejectBtn = domNode.querySelector('.reject-btn');
 						
-						applyBtn?.addEventListener('click', () => applyPendingEdit(edit.id));
-						rejectBtn?.addEventListener('click', () => rejectPendingEdit(edit.id));
+						applyBtn?.addEventListener('click', () => {
+							console.log('🟢 Apply button clicked for edit:', edit.id);
+							applyPendingEdit(edit.id);
+						});
+						rejectBtn?.addEventListener('click', () => {
+							console.log('🔴 Reject button clicked for edit:', edit.id);
+							rejectPendingEdit(edit.id);
+						});
 						
+						console.log('🪄 Created widget DOM node:', domNode);
 						return domNode;
 					},
 					getPosition: () => ({
@@ -236,27 +322,49 @@
 
 				monacoEditor.addContentWidget(widget);
 				edit.widgetId = widgetId;
+				console.log('✅ Added content widget:', widgetId);
 			}
 		});
 	}
 
-	function updatePreviewContent() {
-		if (!monacoEditor) return;
+	function updatePreviewContentForFile(filePath: string, baseContent?: string) {
+		if (!filePath) return;
 		
-		// Start with current editor content
-		let content = originalEditorContent || monacoEditor.getValue();
+		// Use provided base content or get from original store
+		let content = baseContent || originalFileContents.get(filePath) || '';
+		if (!content && filePath === currentFilePath && monacoEditor) {
+			content = monacoEditor.getValue();
+		}
 		
-		// Apply all pending edits to create preview
-		pendingEdits.forEach(edit => {
-			content = content.replace(edit.oldString, edit.newString);
+		// Apply all pending edits for this file to create preview
+		const fileEdits = globalPendingEdits.get(filePath) || [];
+		fileEdits.forEach(edit => {
+			if (!edit.applied) {
+				content = content.replace(edit.oldString, edit.newString);
+			}
 		});
 		
-		previewContent = content;
+		previewFileContents.set(filePath, content);
+		console.log('📄 Updated preview content for', filePath, ', length:', content.length);
+		
+		// Force Monaco editor to refresh its view if this is the current file
+		if (filePath === currentFilePath && monacoEditor) {
+			setTimeout(() => {
+				monacoEditor.layout();
+				monacoEditor.getAction('editor.action.refreshDecorations')?.run();
+			}, 10);
+		}
+	}
+
+	// Legacy function for current file
+	function updatePreviewContent() {
+		if (!currentFilePath) return;
+		updatePreviewContentForFile(currentFilePath);
 	}
 
 	function applyPendingEdit(editId: string) {
 		const editIndex = pendingEdits.findIndex(e => e.id === editId);
-		if (editIndex === -1) return;
+		if (editIndex === -1 || !currentFilePath) return;
 
 		const edit = pendingEdits[editIndex];
 		
@@ -264,39 +372,25 @@
 		const currentContent = monacoEditor.getValue();
 		const newContent = currentContent.replace(edit.oldString, edit.newString);
 		
-		// Store original content if this is the first edit
-		if (!originalEditorContent) {
-			originalEditorContent = currentContent;
+		// Store original content if this is the first edit for this file
+		if (!originalFileContents.has(currentFilePath)) {
+			originalFileContents.set(currentFilePath, currentContent);
 		}
 		
 		monacoEditor.setValue(newContent);
 		
-		// Mark as applied and remove from pending
+		// Mark as applied in both local and global state
 		edit.applied = true;
-		pendingEdits = pendingEdits.filter(e => e.id !== editId);
 		
-		// Remove the widget
-		if (edit.widgetId) {
-			monacoEditor.removeContentWidget({ getId: () => edit.widgetId });
+		// Update global state
+		const globalFileEdits = globalPendingEdits.get(currentFilePath) || [];
+		const globalEditIndex = globalFileEdits.findIndex(e => e.id === editId);
+		if (globalEditIndex !== -1) {
+			globalFileEdits[globalEditIndex].applied = true;
+			globalPendingEdits.set(currentFilePath, globalFileEdits);
 		}
 		
-		// Update decorations
-		updateEditorDecorations();
-		updatePreviewContent();
-		
-		// Mark as unsaved
-		unsavedChanges = true;
-		
-		console.log('Applied edit:', editId);
-	}
-
-	function rejectPendingEdit(editId: string) {
-		const editIndex = pendingEdits.findIndex(e => e.id === editId);
-		if (editIndex === -1) return;
-
-		const edit = pendingEdits[editIndex];
-		
-		// Remove from pending edits
+		// Remove from local pending edits
 		pendingEdits = pendingEdits.filter(e => e.id !== editId);
 		
 		// Remove the widget
@@ -306,9 +400,42 @@
 		
 		// Update decorations and preview
 		updateEditorDecorations();
-		updatePreviewContent();
+		updatePreviewContentForFile(currentFilePath);
 		
-		console.log('Rejected edit:', editId);
+		// Mark as unsaved
+		unsavedChanges = true;
+		
+		console.log('Applied edit:', editId, 'for file:', currentFilePath);
+	}
+
+	function rejectPendingEdit(editId: string) {
+		const editIndex = pendingEdits.findIndex(e => e.id === editId);
+		if (editIndex === -1 || !currentFilePath) return;
+
+		const edit = pendingEdits[editIndex];
+		
+		// Remove from local pending edits
+		pendingEdits = pendingEdits.filter(e => e.id !== editId);
+		
+		// Remove from global state
+		const globalFileEdits = globalPendingEdits.get(currentFilePath) || [];
+		const updatedGlobalEdits = globalFileEdits.filter(e => e.id !== editId);
+		if (updatedGlobalEdits.length > 0) {
+			globalPendingEdits.set(currentFilePath, updatedGlobalEdits);
+		} else {
+			globalPendingEdits.delete(currentFilePath);
+		}
+		
+		// Remove the widget
+		if (edit.widgetId) {
+			monacoEditor.removeContentWidget({ getId: () => edit.widgetId });
+		}
+		
+		// Update decorations and preview
+		updateEditorDecorations();
+		updatePreviewContentForFile(currentFilePath);
+		
+		console.log('Rejected edit:', editId, 'for file:', currentFilePath);
 	}
 
 	let editorContainer: HTMLDivElement;
@@ -323,7 +450,19 @@
 	let autoSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let pdfUrl: string | null = null;
 
-	// Editor diff state
+	// Global diff state - tracks pending edits for ALL files
+	let globalPendingEdits: Map<string, Array<{
+		id: string;
+		range: any;
+		oldString: string;
+		newString: string;
+		applied: boolean;
+		decorationIds: string[];
+		widgetId?: string;
+		filePath: string;
+	}>> = new Map();
+	
+	// Current file specific state
 	let pendingEdits: Array<{
 		id: string;
 		range: any;
@@ -334,8 +473,8 @@
 		widgetId?: string;
 	}> = [];
 	let editorDecorations: string[] = [];
-	let originalEditorContent: string = '';
-	let previewContent: string = ''; // Content with all changes applied for PDF rendering
+	let originalFileContents: Map<string, string> = new Map(); // Store original content per file
+	let previewFileContents: Map<string, string> = new Map(); // Store preview content per file
 
 	// Layout state
 	let layoutMode: 'both' | 'editor' | 'pdf' = 'both';
@@ -366,6 +505,17 @@
 	let claudeSessionId = '';
 	let claudeCodeSubmitting = false;
 
+	// Project Settings Modal state
+	let showProjectSettingsModal = false;
+	let projectSettings = {
+		mainDocument: null as string | null,
+		compileOptions: {
+			engine: 'pdflatex',
+			outputDirectory: 'build'
+		},
+		version: '1.0'
+	};
+
 	// Git state
 	let gitStatus: GitStatusResponse | null = null;
 	let isCommitting = false;
@@ -395,6 +545,31 @@
 	// Get current user ID
 	function getCurrentUserId(): string {
 		return $authStore.user?.id || 'anonymous';
+	}
+
+	// Load project settings
+	async function loadProjectSettings() {
+		if (!currentRepoName) return;
+
+		try {
+			const userId = getCurrentUserId();
+			const settings = await apiClient.getProjectSettings(currentRepoName, userId);
+			projectSettings = settings;
+		} catch (error) {
+			console.error('Failed to load project settings:', error);
+			// Keep default settings if loading fails
+		}
+	}
+
+	// Check if current file is the main document
+	function isCurrentFileMainDocument(): boolean {
+		if (!currentFilePath || !projectSettings.mainDocument) return false;
+		return currentFilePath === projectSettings.mainDocument;
+	}
+
+	// Check if current file is a .tex file
+	function isCurrentFileTexFile(): boolean {
+		return currentFilePath?.endsWith('.tex') || false;
 	}
 
 	// Get repo name from URL params or localStorage
@@ -431,6 +606,9 @@
 		}
 
 		await initializeMonaco();
+
+		// Load project settings
+		await loadProjectSettings();
 
 		// Load git status on mount
 		await handleRefreshGitStatus();
@@ -485,8 +663,11 @@
 				insertSpaces: true
 			});
 
-			// Initialize preview content
-			previewContent = monacoEditor.getValue();
+			// Initialize preview content for the welcome file
+			const initialContent = monacoEditor.getValue();
+			if (currentFilePath) {
+				previewFileContents.set(currentFilePath, initialContent);
+			}
 
 			// Auto-save on content change
 			monacoEditor.onDidChangeModelContent(() => {
@@ -527,8 +708,14 @@
 			const response = await apiClient.getFileContent(currentRepoName, filePath, userId);
 
 			if (monacoEditor) {
-				// Clear any pending edits when switching files
-				clearPendingEdits();
+				const previousFilePath = currentFilePath;
+				
+				// Save current file state if switching files
+				if (previousFilePath && previousFilePath !== filePath) {
+					console.log('💾 Saving state for file:', previousFilePath);
+					savePendingEditsForFile(previousFilePath);
+					clearCurrentFileDecorations();
+				}
 				
 				monacoEditor.setValue(response.content);
 				currentFilePath = filePath;
@@ -536,9 +723,8 @@
 				compileError = null;
 				compileSuccess = false;
 				
-				// Reset diff state
-				originalEditorContent = '';
-				previewContent = response.content;
+				// Load pending edits for this file
+				loadPendingEditsForFile(filePath, response.content);
 
 				// Set language based on file extension
 				const ext = filePath.split('.').pop()?.toLowerCase();
@@ -554,28 +740,96 @@
 									: 'plaintext';
 
 				monaco.editor.setModelLanguage(monacoEditor.getModel(), language);
+				
+				// Restore decorations if we have pending edits for this file
+				setTimeout(() => {
+					console.log('🔄 Restoring decorations after file load, pending edits:', pendingEdits.length);
+					if (pendingEdits.length > 0) {
+						updateEditorDecorations();
+					}
+				}, 100);
 			}
 		} catch (err) {
 			compileError = err instanceof Error ? err.message : 'Failed to load file';
 		}
 	}
 
-	function clearPendingEdits() {
+	// Save current file's pending edits state
+	function savePendingEditsForFile(filePath: string) {
+		if (!filePath) return;
+		
+		console.log('💾 Saving pending edits state for:', filePath);
+		
+		// Update global store with current state
+		if (pendingEdits.length > 0) {
+			const editsWithFilePath = pendingEdits.map(edit => ({ ...edit, filePath }));
+			globalPendingEdits.set(filePath, editsWithFilePath);
+		}
+	}
+
+	// Load pending edits for a specific file
+	function loadPendingEditsForFile(filePath: string, fileContent: string) {
+		if (!filePath) return;
+		
+		console.log('📂 Loading pending edits for:', filePath);
+		
+		// Load from global store
+		const fileEdits = globalPendingEdits.get(filePath) || [];
+		pendingEdits = fileEdits.map(edit => {
+			// Remove filePath for local usage and reset widget/decoration IDs
+			const { filePath: _, ...localEdit } = edit;
+			return {
+				...localEdit,
+				decorationIds: [],
+				widgetId: undefined
+			};
+		});
+		
+		// Store original content if we have pending edits
+		if (pendingEdits.length > 0) {
+			if (!originalFileContents.has(filePath)) {
+				originalFileContents.set(filePath, fileContent);
+			}
+			updatePreviewContentForFile(filePath, fileContent);
+		} else {
+			// No pending edits, preview content is same as file content
+			previewFileContents.set(filePath, fileContent);
+		}
+		
+		console.log('📂 Loaded', pendingEdits.length, 'pending edits for', filePath);
+	}
+
+	// Clear current file decorations without affecting global state
+	function clearCurrentFileDecorations() {
 		// Remove all content widgets
 		pendingEdits.forEach(edit => {
 			if (edit.widgetId) {
-				monacoEditor.removeContentWidget({ getId: () => edit.widgetId });
+				monacoEditor?.removeContentWidget({ getId: () => edit.widgetId });
 			}
 		});
 		
 		// Clear decorations
 		if (editorDecorations.length > 0) {
-			monacoEditor.deltaDecorations(editorDecorations, []);
+			monacoEditor?.deltaDecorations(editorDecorations, []);
 			editorDecorations = [];
 		}
 		
-		// Clear pending edits
+		// Clear local pending edits (global state preserved)
 		pendingEdits = [];
+	}
+
+	// Clear all pending edits (global reset)
+	function clearAllPendingEdits() {
+		clearCurrentFileDecorations();
+		globalPendingEdits.clear();
+		originalFileContents.clear();
+		previewFileContents.clear();
+		console.log('🧹 Cleared all pending edits globally');
+	}
+
+	// Legacy function for backward compatibility
+	function clearPendingEdits() {
+		clearCurrentFileDecorations();
 	}
 
 	async function handleSaveFile() {
@@ -596,7 +850,7 @@
 		}
 	}
 
-	async function handleCompile() {
+	async function handleCompile(compileMain = false) {
 		if (!currentRepoName) return;
 
 		isCompiling = true;
@@ -606,19 +860,46 @@
 		try {
 			const userId = getCurrentUserId();
 			
-			// If we have pending edits, save preview content temporarily for compilation
-			if (pendingEdits.length > 0 && currentFilePath) {
-				console.log('🎯 Compiling with preview content including pending changes');
+			// Determine which file to compile
+			let texFileToCompile: string;
+			
+			if (compileMain && projectSettings.mainDocument) {
+				// Compile the main document
+				texFileToCompile = projectSettings.mainDocument;
+			} else if (currentFilePath?.endsWith('.tex')) {
+				// Compile the current file
+				texFileToCompile = currentFilePath;
+			} else {
+				// Default fallback
+				texFileToCompile = projectSettings.mainDocument || 'main.tex';
+			}
+			
+			// Save preview content for all files with pending edits for compilation
+			if (globalPendingEdits.size > 0) {
+				console.log('🎯 Compiling with preview content including pending changes for', globalPendingEdits.size, 'files');
 				
-				// Save the preview content (with all pending changes applied) temporarily
-				await apiClient.saveFile(currentRepoName, currentFilePath, previewContent, userId);
+				// Save preview content for all files with pending edits
+				for (const [filePath, fileEdits] of globalPendingEdits.entries()) {
+					const unappliedEdits = fileEdits.filter(edit => !edit.applied);
+					if (unappliedEdits.length > 0) {
+						const previewContent = previewFileContents.get(filePath);
+						if (previewContent) {
+							console.log('📄 Saving preview content for', filePath, 'with', unappliedEdits.length, 'pending edits');
+							await apiClient.saveFile(currentRepoName, filePath, previewContent, userId);
+						}
+					}
+				}
+				
+				// Also save current file if it has unsaved changes
+				if (currentFilePath && unsavedChanges && !globalPendingEdits.has(currentFilePath)) {
+					await handleSaveFile();
+				}
 			} else if (currentFilePath && unsavedChanges) {
-				// Save current file normally if no pending edits
+				// Save current file normally if no pending edits anywhere
 				await handleSaveFile();
 			}
 
-			const texFile = currentFilePath?.endsWith('.tex') ? currentFilePath : 'main.tex';
-			const result = await apiClient.compileRepo(currentRepoName, userId, texFile);
+			const result = await apiClient.compileRepo(currentRepoName, userId, texFileToCompile);
 			compileSuccess = true;
 
 			if (result.pdfUrl) {
@@ -632,6 +913,15 @@
 		} finally {
 			isCompiling = false;
 		}
+	}
+
+	// Wrapper functions for button clicks
+	function handleCompileCurrent() {
+		handleCompile(false);
+	}
+
+	function handleCompileMain() {
+		handleCompile(true);
 	}
 
 	function handleGoHome() {
@@ -945,7 +1235,52 @@
 		}
 	}
 
-	// Debug function to test tool call detection
+	// Debug function to test in-editor diff system
+	function testInEditorDiff() {
+		if (!monacoEditor || !currentFilePath) {
+			console.log('⚠️ Cannot test: no editor or file loaded');
+			return;
+		}
+		
+		const currentContent = monacoEditor.getValue();
+		console.log('🧪 Testing in-editor diff with current content length:', currentContent.length);
+		
+		// Find a line to modify for testing
+		const lines = currentContent.split('\n');
+		if (lines.length < 5) {
+			console.log('⚠️ Not enough content to test');
+			return;
+		}
+		
+		// Take the first non-empty line and create a test edit
+		const testLineIndex = lines.findIndex((line: string) => line.trim().length > 0);
+		if (testLineIndex === -1) {
+			console.log('⚠️ No non-empty lines found');
+			return;
+		}
+		
+		const testLine = lines[testLineIndex];
+		const testOldString = testLine;
+		const testNewString = testLine + ' ← AI SUGGESTED CHANGE';
+		
+		console.log('🧪 Test edit:', { testOldString, testNewString });
+		
+		const testToolCallData = {
+			name: 'Edit',
+			id: 'test-' + Date.now(),
+			arguments: {
+				file_path: currentFilePath,
+				old_string: testOldString,
+				new_string: testNewString
+			}
+		};
+		
+		console.log('🧪 Processing test tool call...');
+		const editDiff = processEditToolCall(testToolCallData);
+		console.log('🧪 Test result:', editDiff);
+	}
+
+	// Debug function to test tool call detection (fallback)
 	function testToolCallDetection() {
 		const testToolCallData = {
 			name: 'Edit',
@@ -979,6 +1314,12 @@
 				}]
 			}
 		];
+	}
+
+	// Expose test function to window for debugging
+	if (typeof window !== 'undefined') {
+		(window as any).testInEditorDiff = testInEditorDiff;
+		(window as any).testToolCallDetection = testToolCallDetection;
 	}
 
 	// Handle applying edit diffs to the editor
@@ -1177,6 +1518,25 @@
 		showClaudeCodeModal = false;
 		claudeAuthUrl = '';
 		claudeSessionId = '';
+	}
+
+	// Project Settings Modal functions
+	function handleShowProjectSettings() {
+		showProjectSettingsModal = true;
+	}
+
+	function handleCloseProjectSettings() {
+		showProjectSettingsModal = false;
+	}
+
+	async function handleSaveProjectSettings(event: CustomEvent<{ settings: any }>) {
+		const { settings } = event.detail;
+		projectSettings = settings;
+		
+		// Reload settings to ensure consistency
+		await loadProjectSettings();
+		
+		console.log('Project settings saved:', settings);
 	}
 
 
@@ -1544,19 +1904,79 @@
 				</button>
 			{/if}
 
+			<!-- Dynamic compile button based on current file and main document settings -->
+			{#if isCurrentFileTexFile() && !isCurrentFileMainDocument() && projectSettings.mainDocument}
+				<!-- Split button for .tex files that are not the main document -->
+				<div class="flex">
+					<button
+						on:click={handleCompileCurrent}
+						disabled={isCompiling || !currentRepoName}
+						class="btn-primary px-4 py-2 text-sm disabled:opacity-50 rounded-r-none border-r border-blue-700"
+					>
+						{#if isCompiling}
+							<div class="flex items-center space-x-2">
+								<div class="loading-spinner w-4 h-4"></div>
+								<span>Compiling...</span>
+							</div>
+						{:else}
+							Compile Current
+						{/if}
+					</button>
+					<button
+						on:click={handleCompileMain}
+						disabled={isCompiling || !currentRepoName}
+						class="btn-primary px-4 py-2 text-sm disabled:opacity-50 rounded-l-none"
+					>
+						{#if isCompiling}
+							<div class="flex items-center space-x-2">
+								<div class="loading-spinner w-4 h-4"></div>
+								<span>Compiling...</span>
+							</div>
+						{:else}
+							Compile Main
+						{/if}
+					</button>
+				</div>
+			{:else}
+				<!-- Single compile button -->
+				<button
+					on:click={handleCompileCurrent}
+					disabled={isCompiling || !currentRepoName}
+					class="btn-primary px-6 py-2 text-sm disabled:opacity-50"
+				>
+					{#if isCompiling}
+						<div class="flex items-center space-x-2">
+							<div class="loading-spinner w-4 h-4"></div>
+							<span>Compiling...</span>
+						</div>
+					{:else}
+						Compile PDF
+					{/if}
+				</button>
+			{/if}
+
+
+			<!-- Settings button -->
 			<button
-				on:click={handleCompile}
-				disabled={isCompiling || !currentRepoName}
-				class="btn-primary px-6 py-2 text-sm disabled:opacity-50"
+				on:click={handleShowProjectSettings}
+				class="text-gray-400 hover:text-white transition-colors p-2 rounded"
+				title="Project Settings"
+				aria-label="Project Settings"
 			>
-				{#if isCompiling}
-					<div class="flex items-center space-x-2">
-						<div class="loading-spinner w-4 h-4"></div>
-						<span>Compiling...</span>
-					</div>
-				{:else}
-					Compile PDF
-				{/if}
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						stroke-width="2"
+						d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+					/>
+					<path
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						stroke-width="2"
+						d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+					/>
+				</svg>
 			</button>
 		</div>
 	</header>
@@ -1939,22 +2359,49 @@
 	on:cancel={handleClaudeCodeCancel}
 />
 
+<!-- Project Settings Modal -->
+<ProjectSettingsModal
+	bind:isOpen={showProjectSettingsModal}
+	repoName={currentRepoName || ''}
+	userId={getCurrentUserId()}
+	on:close={handleCloseProjectSettings}
+	on:save={handleSaveProjectSettings}
+/>
+
 <style>
 	/* Monaco Editor Diff Decorations */
 	:global(.pending-edit-decoration) {
-		background-color: rgba(255, 152, 0, 0.1);
-		border: 1px solid rgba(255, 152, 0, 0.3);
-		border-radius: 2px;
+		background-color: rgba(255, 152, 0, 0.2) !important;
+		border: 2px solid rgba(255, 152, 0, 0.6) !important;
+		border-radius: 3px !important;
+		box-shadow: 0 0 4px rgba(255, 152, 0, 0.3) !important;
 	}
 
 	:global(.pending-edit-line-decoration) {
-		background-color: rgba(255, 152, 0, 0.05);
+		background-color: rgba(255, 152, 0, 0.1) !important;
+		border-left: 4px solid #ff9800 !important;
 	}
 
 	:global(.pending-edit-margin) {
-		background-color: #ff9800;
-		width: 3px !important;
-		margin-left: 3px;
+		background-color: #ff9800 !important;
+		width: 4px !important;
+		margin-left: 2px !important;
+	}
+
+	:global(.pending-edit-glyph) {
+		background-color: #ff9800 !important;
+		border-radius: 50% !important;
+		width: 12px !important;
+		height: 12px !important;
+		margin-left: 4px !important;
+		margin-top: 2px !important;
+	}
+
+	:global(.pending-edit-after-content) {
+		color: #4ade80 !important;
+		font-style: italic !important;
+		opacity: 0.8 !important;
+		font-weight: bold !important;
 	}
 
 	/* Content Widget Styles */

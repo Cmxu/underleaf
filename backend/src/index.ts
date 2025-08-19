@@ -1422,48 +1422,61 @@ expect {
 # 4. Wait for and capture the authentication URL, then background the process
 expect {
     -re {Browser didn't open\\? Use the url below to sign in: (https?://[^\\s\\r\\n\\x1b\\x00-\\x1f]+)} {
-        puts "AUTH_URL_FOUND: $expect_out(1,string)"
-        puts "DEBUG: Found browser message with URL: $expect_out(1,string)"
-        puts "WAITING_FOR_CODE"
-        
-        # Send Ctrl-Z to background the claude process
-        # puts "DEBUG: Sending Ctrl-Z to background claude process"
-        # send "\\032"
-        
-        # Wait a moment for the process to be backgrounded
-        after 1000
-        
-        # Now we wait for the verification code file
-        puts "DEBUG: Claude process backgrounded, waiting for verification code file"
+        set url_found $expect_out(1,string)
+        puts "DEBUG: Found browser message with URL: $url_found"
+        # Filter out documentation URLs and press Enter to continue
+        if {[string match "*docs.anthropic.com*" $url_found] || [string match "*help.anthropic.com*" $url_found]} {
+            puts "DEBUG: Found documentation URL, pressing Enter to continue: $url_found"
+            send "\\r"
+            exp_continue
+        } else {
+            puts "AUTH_URL_FOUND: $url_found"
+            puts "WAITING_FOR_CODE"
+            
+            # Wait a moment for the process to be backgrounded
+            after 1000
+            
+            # Now we wait for the verification code file
+            puts "DEBUG: Claude process backgrounded, waiting for verification code file"
+        }
     }
     -re {Use the url below to sign in: (https?://[^\\s\\r\\n\\x1b\\x00-\\x1f]+)} {
-        puts "AUTH_URL_FOUND: $expect_out(1,string)"
-        puts "DEBUG: Found sign in URL: $expect_out(1,string)"
-        puts "WAITING_FOR_CODE"
-        
-        # Send Ctrl-Z to background the claude process
-        # puts "DEBUG: Sending Ctrl-Z to background claude process"
-        # send "\\032"
-        
-        # Wait a moment for the process to be backgrounded
-        after 1000
-        
-        # Now we wait for the verification code file
-        puts "DEBUG: Claude process backgrounded, waiting for verification code file"
+        set url_found $expect_out(1,string)
+        puts "DEBUG: Found sign in URL: $url_found"
+        # Filter out documentation URLs and press Enter to continue
+        if {[string match "*docs.anthropic.com*" $url_found] || [string match "*help.anthropic.com*" $url_found]} {
+            puts "DEBUG: Found documentation URL, pressing Enter to continue: $url_found"
+            send "\\r"
+            exp_continue
+        } else {
+            puts "AUTH_URL_FOUND: $url_found"
+            puts "WAITING_FOR_CODE"
+            
+            # Wait a moment for the process to be backgrounded
+            after 1000
+            
+            # Now we wait for the verification code file
+            puts "DEBUG: Claude process backgrounded, waiting for verification code file"
+        }
     }
     -re {(https?://[^\\s\\r\\n\\x1b\\x00-\\x1f]+)} {
-        puts "AUTH_URL_FOUND: $expect_out(1,string)"
-        puts "DEBUG: Found standalone URL: $expect_out(1,string)"
-        puts "WAITING_FOR_CODE"
-        
-        # Send Ctrl-Z to background the claude process
-        # puts "DEBUG: Sending Ctrl-Z to background claude process"
-        # send "\\032"
-        # Wait a moment for the process to be backgrounded
-        after 1000
-        
-        # Now we wait for the verification code file
-        puts "DEBUG: Claude process backgrounded, waiting for verification code file"
+        set url_found $expect_out(1,string)
+        puts "DEBUG: Found standalone URL: $url_found"
+        # Filter out documentation URLs and press Enter to continue
+        if {[string match "*docs.anthropic.com*" $url_found] || [string match "*help.anthropic.com*" $url_found]} {
+            puts "DEBUG: Found documentation URL, pressing Enter to continue: $url_found"
+            send "\\r"
+            exp_continue
+        } else {
+            puts "AUTH_URL_FOUND: $url_found"
+            puts "WAITING_FOR_CODE"
+            
+            # Wait a moment for the process to be backgrounded
+            after 1000
+            
+            # Now we wait for the verification code file
+            puts "DEBUG: Claude process backgrounded, waiting for verification code file"
+        }
     }
     -re {Paste code here if prompted >|Enter the verification code|verification code|Enter code|code:} {
         puts "CODE_PROMPT_READY"
@@ -1474,17 +1487,37 @@ expect {
         puts "ALREADY_AUTHENTICATED"
         exit 0
     }
+    -re {Port.*already in use|OAuth error.*Port.*already in use} {
+        puts "DEBUG: Port conflict detected, attempting cleanup"
+        puts "PORT_CONFLICT_ERROR"
+        exit 2
+    }
+    -re {OAuth error.*Press Enter to retry|Request failed.*Press Enter to retry} {
+        puts "DEBUG: OAuth error detected, pressing Enter to retry"
+        send "\\r"
+        exp_continue
+    }
+    -re {Press Enter to retry} {
+        puts "DEBUG: Retry prompt detected, pressing Enter to retry"
+        send "\\r"
+        exp_continue
+    }
     -re {error|failed|invalid} {
         puts "SETUP_ERROR"
         exit 1
     }
+    
     timeout {
         puts "DEBUG: Timeout waiting for URL or code prompt"
         puts "DEBUG: Buffer content: $expect_out(buffer)"
+        puts "DEBUG: Full spawn ID output:"
+        puts "TIMEOUT_ERROR"
         exit 1
     }
     eof {
         puts "DEBUG: Process ended unexpectedly"
+        puts "DEBUG: Buffer content at EOF: $expect_out(buffer)"
+        puts "EOF_ERROR"
         exit 1
     }
 }
@@ -1645,16 +1678,29 @@ expect {
     }
 }
 
-# Finally, send Ctrl-C twice to finish
-puts "DEBUG: Authentication flow complete, sending Ctrl-C twice"
-send "\\003"
-after 500
-send "\\003"
-after 1000
-
-puts "AUTHENTICATION_SUCCESS"
-puts "DEBUG: Claude authentication setup completed successfully"
-exit 0
+# Wait for Claude Code welcome screen and exit
+expect {
+    -re {✻ Welcome to Claude Code!|Welcome to Claude Code} {
+        puts "DEBUG: Found Claude Code welcome screen, pressing Escape to exit"
+        send "\\033"
+        after 1000
+        puts "AUTHENTICATION_SUCCESS"
+        puts "DEBUG: Claude authentication setup completed successfully"
+        exit 0
+    }
+    timeout {
+        puts "DEBUG: Timeout waiting for Claude Code welcome - assuming success"
+        puts "AUTHENTICATION_SUCCESS"
+        puts "DEBUG: Claude authentication setup completed successfully"
+        exit 0
+    }
+    eof {
+        puts "DEBUG: Process ended - assuming authentication success"
+        puts "AUTHENTICATION_SUCCESS"
+        puts "DEBUG: Claude authentication setup completed successfully"
+        exit 0
+    }
+}
 `;
 
       console.log(`Using existing container ${tempContainerName} for Claude setup`);
@@ -1671,6 +1717,42 @@ exit 0
       await containerService.executeInUserContainer(userId, repoName, [
         'chmod', '777', '/tmp/claude-comm'
       ]);
+
+      // Clean up any existing Claude processes and free up the OAuth port
+      console.log('🧹 Cleaning up any existing Claude processes...');
+      try {
+        // Kill any existing Claude processes
+        await containerService.executeInUserContainer(userId, repoName, [
+          'pkill', '-f', 'claude'
+        ]).catch(() => {}); // Ignore errors if no processes exist
+        
+        // Kill any processes using port 54545 (Claude's OAuth port)
+        await containerService.executeInUserContainer(userId, repoName, [
+          'sh', '-c', 'lsof -ti:54545 | xargs -r kill -9'
+        ]).catch(() => {}); // Ignore errors if port is not in use
+        
+        // Kill any Node.js processes that might be leftover OAuth servers
+        await containerService.executeInUserContainer(userId, repoName, [
+          'sh', '-c', 'pkill -f "node.*54545" || true'
+        ]).catch(() => {});
+        
+        // Wait a moment for processes to clean up
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        // Final check - verify port 54545 is free
+        try {
+          const { stdout: portCheck } = await containerService.executeInUserContainer(userId, repoName, [
+            'sh', '-c', 'lsof -i:54545 || echo "Port 54545 is free"'
+          ]);
+          console.log('🔍 Port 54545 status:', portCheck.trim());
+        } catch (portError) {
+          console.log('🔍 Port 54545 appears to be free (lsof failed, which is good)');
+        }
+        
+        console.log('✅ Claude process cleanup completed');
+      } catch (cleanupError) {
+        console.warn('⚠️ Claude process cleanup had issues (may be normal):', cleanupError);
+      }
 
       // Copy the expect script into the container
       await containerService.executeInUserContainer(userId, repoName, [
@@ -1736,13 +1818,61 @@ exit 0
           }
         }
         
+        // Handle direct code prompt (when Claude skips showing URL and goes straight to code input)
+        if (data.includes('CODE_PROMPT_READY') && !responseAlreadySent) {
+          console.log('🔍 CODE_PROMPT_READY detected - Claude is ready for verification code');
+          responseAlreadySent = true;
+          clearTimeout(timeout);
+          
+          // Store container info for later code submission
+          (global as any).claudeContainers = (global as any).claudeContainers || {};
+          const containerInfo = {
+            container: tempContainer,
+            stream: containerStream,
+            containerName: tempContainerName,
+            tempCommDir: '/tmp/claude-comm',
+            userId,
+            repoName,
+            authUrl: '', // No URL in this case
+            createdAt: new Date().toISOString()
+          };
+          
+          const sessionId = `${userId}-${repoName}`;
+          (global as any).claudeContainers[sessionId] = containerInfo;
+          (global as any).claudeContainers[tempContainerName] = containerInfo;
+          
+          res.json({
+            message: 'Claude is ready for verification code',
+            authUrl: '', // No URL needed
+            step: 'waiting_for_code',
+            instructions: [
+              '1. Claude is already authenticated and ready for verification code',
+              '2. Enter the verification code you received',
+              '3. The code will be submitted automatically'
+            ],
+            output: outputBuffer,
+            needsUserCode: true,
+            sessionId: sessionId,
+            skipUrlStep: true // Indicate that we're skipping the URL step
+          });
+        }
+        
         // Also check if there's a URL anywhere in the output (fallback)
+        // But exclude documentation URLs and other non-auth URLs
         if (!authUrl && !responseAlreadySent) {
           const urlMatch = data.match(/https?:\/\/[^\s\r\n\x1b\x00-\x1f]+/);
           if (urlMatch) {
-            authUrl = urlMatch[0].trim();
-            if (!responseAlreadySent) {
-              respondWithUrl();
+            const potentialUrl = urlMatch[0].trim();
+            // Filter out documentation URLs and other non-auth URLs
+            if (!potentialUrl.includes('docs.anthropic.com') && 
+                !potentialUrl.includes('anthropic.com/docs') &&
+                !potentialUrl.includes('console.anthropic.com/docs') &&
+                !potentialUrl.includes('help.anthropic.com') &&
+                !potentialUrl.includes('anthropic.com/help')) {
+              authUrl = potentialUrl;
+              if (!responseAlreadySent) {
+                respondWithUrl();
+              }
             }
           }
         }
@@ -1750,6 +1880,45 @@ exit 0
         // Also check for the old flow - if we see WAITING_FOR_CODE with a URL
         if (data.includes('WAITING_FOR_CODE') && authUrl && !responseAlreadySent) {
           respondWithUrl();
+        }
+        
+        // Handle WAITING_FOR_USER_INPUT as another indicator that code input is ready
+        if (data.includes('WAITING_FOR_USER_INPUT') && !responseAlreadySent) {
+          console.log('🔍 WAITING_FOR_USER_INPUT detected - Claude is ready for verification code');
+          responseAlreadySent = true;
+          clearTimeout(timeout);
+          
+          // Store container info for later code submission
+          (global as any).claudeContainers = (global as any).claudeContainers || {};
+          const containerInfo = {
+            container: tempContainer,
+            stream: containerStream,
+            containerName: tempContainerName,
+            tempCommDir: '/tmp/claude-comm',
+            userId,
+            repoName,
+            authUrl: '', // No URL in this case
+            createdAt: new Date().toISOString()
+          };
+          
+          const sessionId = `${userId}-${repoName}`;
+          (global as any).claudeContainers[sessionId] = containerInfo;
+          (global as any).claudeContainers[tempContainerName] = containerInfo;
+          
+          res.json({
+            message: 'Claude is ready for verification code',
+            authUrl: '', // No URL needed
+            step: 'waiting_for_code',
+            instructions: [
+              '1. Claude is ready for your verification code',
+              '2. Check your email/phone for the verification code',
+              '3. Enter the code in the popup to complete setup'
+            ],
+            output: outputBuffer,
+            needsUserCode: true,
+            sessionId: sessionId,
+            skipUrlStep: true // Indicate that we're skipping the URL step
+          });
         }
         
         function respondWithUrl() {
@@ -1824,6 +1993,33 @@ exit 0
             configured: true
           });
         }
+        
+        // Handle timeout and EOF errors
+        if ((data.includes('TIMEOUT_ERROR') || data.includes('EOF_ERROR')) && !responseAlreadySent) {
+          responseAlreadySent = true;
+          clearTimeout(timeout);
+          
+          res.status(500).json({
+            error: 'Claude authentication setup failed',
+            step: 'setup_error',
+            details: data.includes('TIMEOUT_ERROR') ? 'Timeout waiting for authentication screen' : 'Process ended unexpectedly',
+            debugOutput: outputBuffer
+          });
+        }
+        
+        // Handle port conflict errors
+        if (data.includes('PORT_CONFLICT_ERROR') && !responseAlreadySent) {
+          responseAlreadySent = true;
+          clearTimeout(timeout);
+          
+          res.status(409).json({
+            error: 'Claude authentication port conflict',
+            step: 'port_conflict',
+            details: 'OAuth port 54545 is already in use. Please try again in a few seconds.',
+            retryable: true,
+            debugOutput: outputBuffer
+          });
+        }
       });
 
       // This fallback is no longer needed since we handle responses in the stream handler
@@ -1881,9 +2077,6 @@ app.post('/api/claude/verify-code', async (req, res) => {
       const cleanCode = verificationCode.trim();
       console.log('📝 Writing verification code to container:', cleanCode.length, 'characters');
       
-      // Escape the verification code for safe shell usage
-      const escapedCode = cleanCode.replace(/'/g, "'\"'\"'");
-      
       // Create directory and write file in separate steps for better error handling
       try {
         // Step 1: Create directory
@@ -1906,18 +2099,23 @@ app.post('/api/claude/verify-code', async (req, res) => {
         
         console.log('📁 Directory creation output:', mkdirOutput || '(no output)');
         
-        // Step 2: Write the verification code file
+        // Step 2: Write the verification code file using stdin to avoid shell escaping issues
         const writeExec = await container.exec({
-          Cmd: ['sh', '-c', `echo '${escapedCode}' > /tmp/claude-comm/verification_code.txt`],
+          Cmd: ['tee', '/tmp/claude-comm/verification_code.txt'],
           AttachStdout: true,
-          AttachStderr: true
+          AttachStderr: true,
+          AttachStdin: true
         });
         
-        const writeStream = await writeExec.start({ hijack: true, stdin: false });
+        const writeStream = await writeExec.start({ hijack: true, stdin: true });
         let writeOutput = '';
         writeStream.on('data', (chunk: Buffer) => {
           writeOutput += chunk.toString();
         });
+        
+        // Write the verification code directly to stdin
+        writeStream.write(cleanCode);
+        writeStream.end();
         
         await new Promise((resolve, reject) => {
           writeStream.on('end', resolve);
@@ -1953,7 +2151,7 @@ app.post('/api/claude/verify-code', async (req, res) => {
         const verifyExec = await container.exec({
           Cmd: ['cat', '/tmp/claude-comm/verification_code.txt'],
           AttachStdout: true,
-          AttachStderr: true
+          AttachStderr: false
         });
         
         const verifyStream = await verifyExec.start({ hijack: true, stdin: false });
@@ -1961,11 +2159,11 @@ app.post('/api/claude/verify-code', async (req, res) => {
         verifyStream.on('data', (chunk: Buffer) => {
           verifyOutput += chunk.toString();
         });
-        
         await new Promise((resolve, reject) => {
           verifyStream.on('end', resolve);
           verifyStream.on('error', reject);
         });
+        console.log('🔍 Verification output:', verifyOutput);
         
         console.log('🔍 File verification - expected length:', cleanCode.length, 'actual length:', verifyOutput.trim().length);
         console.log('🔍 File content matches:', verifyOutput.trim() === cleanCode);
@@ -2207,13 +2405,27 @@ app.post('/api/claude', async (req, res) => {
       // Build Claude command with optional session resume and MCP configuration
       const claudeCmd = ['claude', '--print', '--verbose', '--output-format', 'stream-json'];
       
-      // Add MCP configuration if .claude/settings.json exists
+      // Add MCP configuration if .claude/settings.json exists and contains MCP servers
       try {
         const settingsExist = await containerService.checkClaudeSettings(userId, repoName);
         if (settingsExist) {
-          claudeCmd.push('--mcp-config', '.claude/settings.json');
-          claudeCmd.push('--permission-prompt-tool', 'mcp__underleaf_permissions__permission_prompt');
-          console.log('🔧 Using MCP configuration with permission prompt tool');
+          // Check if settings contains MCP configuration
+          try {
+            const { stdout: settingsContent } = await containerService.executeInUserContainer(
+              userId, repoName, ['cat', '.claude/settings.json']
+            );
+            const settings = JSON.parse(settingsContent);
+            
+            if (settings.mcpServers && Object.keys(settings.mcpServers).length > 0) {
+              claudeCmd.push('--mcp-config', '.claude/settings.json');
+              claudeCmd.push('--permission-prompt-tool', 'mcp__underleaf_permissions__permission_prompt');
+              console.log('🔧 Using MCP configuration with permission prompt tool');
+            } else {
+              console.log('📝 Settings file exists but no MCP servers configured, skipping MCP configuration');
+            }
+          } catch (parseError) {
+            console.warn('Failed to parse Claude settings:', parseError);
+          }
         }
       } catch (error) {
         console.warn('Failed to check Claude settings:', error);
@@ -2545,6 +2757,172 @@ app.post('/api/claude', async (req, res) => {
     } catch (err) {
       console.error('Command execution endpoint error:', err);
       return res.status(500).json({ error: 'Failed to execute command' });
+    }
+  });
+
+  // Debug MCP configuration endpoint
+  app.get('/api/claude/debug/:userId/:repoName', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      
+      // Check if repository volume exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      const debugInfo: any = {
+        settingsExists: false,
+        settingsContent: null,
+        mcpServerExists: false,
+        nodeInstalled: false,
+        claudeVersion: null,
+        workdir: null
+      };
+
+      try {
+        // Check if settings file exists
+        debugInfo.settingsExists = await containerService.checkClaudeSettings(userId, repoName);
+        
+        // Get settings content if it exists
+        if (debugInfo.settingsExists) {
+          try {
+            const { stdout: content } = await containerService.executeInUserContainer(
+              userId, repoName, ['cat', '.claude/settings.json']
+            );
+            debugInfo.settingsContent = JSON.parse(content);
+          } catch (error) {
+            debugInfo.settingsContent = `Error reading settings: ${error}`;
+          }
+        }
+
+        // Check if MCP server file exists
+        try {
+          await containerService.executeInUserContainer(
+            userId, repoName, ['test', '-f', '/usr/local/bin/permission-prompt-server.js']
+          );
+          debugInfo.mcpServerExists = true;
+        } catch (error) {
+          debugInfo.mcpServerExists = false;
+        }
+
+        // Check if node is installed
+        try {
+          const { stdout: nodeVersion } = await containerService.executeInUserContainer(
+            userId, repoName, ['node', '--version']
+          );
+          debugInfo.nodeInstalled = nodeVersion.trim();
+        } catch (error) {
+          debugInfo.nodeInstalled = false;
+        }
+
+        // Check Claude version
+        try {
+          const { stdout: claudeVersion } = await containerService.executeInUserContainer(
+            userId, repoName, ['claude', '--version']
+          );
+          debugInfo.claudeVersion = claudeVersion.trim();
+        } catch (error) {
+          debugInfo.claudeVersion = `Error: ${error}`;
+        }
+
+        // Check current working directory
+        try {
+          const { stdout: pwd } = await containerService.executeInUserContainer(
+            userId, repoName, ['pwd']
+          );
+          debugInfo.workdir = pwd.trim();
+        } catch (error) {
+          debugInfo.workdir = `Error: ${error}`;
+        }
+
+        return res.json(debugInfo);
+      } catch (containerError) {
+        console.error('Container debug error:', containerError);
+        return res.status(500).json({ error: 'Failed to debug container setup' });
+      }
+    } catch (err) {
+      console.error('Debug endpoint error:', err);
+      return res.status(500).json({ error: 'Failed to debug MCP configuration' });
+    }
+  });
+
+  // Project settings endpoints
+  
+  // Get project settings
+  app.get('/api/project/:userId/:repoName/settings', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      
+      // Check if repository volume exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      try {
+        const settings = await containerService.getProjectSettings(userId, repoName);
+        return res.json(settings);
+      } catch (containerError) {
+        console.error('Container get project settings error:', containerError);
+        return res.status(500).json({ error: 'Failed to get project settings from container' });
+      }
+    } catch (err) {
+      console.error('Get project settings endpoint error:', err);
+      return res.status(500).json({ error: 'Failed to get project settings' });
+    }
+  });
+
+  // Save project settings
+  app.put('/api/project/:userId/:repoName/settings', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      const settings = req.body;
+      
+      if (!settings) {
+        return res.status(400).json({ error: 'Settings are required' });
+      }
+
+      // Check if repository volume exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      try {
+        await containerService.saveProjectSettings(userId, repoName, settings);
+        return res.json({ message: 'Project settings saved successfully', settings });
+      } catch (containerError) {
+        console.error('Container save project settings error:', containerError);
+        return res.status(500).json({ error: 'Failed to save project settings to container' });
+      }
+    } catch (err) {
+      console.error('Save project settings endpoint error:', err);
+      return res.status(500).json({ error: 'Failed to save project settings' });
+    }
+  });
+
+  // Detect main document
+  app.get('/api/project/:userId/:repoName/detect-main', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      
+      // Check if repository volume exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      try {
+        const mainDocument = await containerService.detectMainDocument(userId, repoName);
+        return res.json({ mainDocument });
+      } catch (containerError) {
+        console.error('Container detect main document error:', containerError);
+        return res.status(500).json({ error: 'Failed to detect main document in container' });
+      }
+    } catch (err) {
+      console.error('Detect main document endpoint error:', err);
+      return res.status(500).json({ error: 'Failed to detect main document' });
     }
   });
 
