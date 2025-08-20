@@ -423,7 +423,7 @@
 {#if isVisible}
 	<div 
 		class="bg-dark-800 border-t border-gray-700 flex flex-col h-full"
-		style="height: {height}px; min-height: 0;"
+		style="min-height: 0;"
 	>
 		<!-- Chat Header -->
 		<div class="bg-dark-700 px-4 py-3 border-b border-gray-600 flex items-center justify-between">

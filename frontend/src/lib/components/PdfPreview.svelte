@@ -2,6 +2,7 @@
 	export let pdfUrl: string | null = null;
 	export let isLoading = false;
 	export let error: string | null = null;
+	export let hasExistingPdfs = false;
 
 	let iframeElement: HTMLIFrameElement;
 	let loadError = false;
@@ -86,7 +87,12 @@
 						/>
 					</svg>
 					<p class="text-lg font-medium mb-2">PDF Preview</p>
-					<p class="text-sm">Compile your LaTeX document to see the preview</p>
+					{#if hasExistingPdfs}
+						<p class="text-sm text-blue-600 mb-2">Existing PDFs found in build folder</p>
+						<p class="text-sm">Compile your LaTeX document to see the latest preview</p>
+					{:else}
+						<p class="text-sm">Compile your LaTeX document to see the preview</p>
+					{/if}
 				</div>
 			</div>
 		{:else if loadError}

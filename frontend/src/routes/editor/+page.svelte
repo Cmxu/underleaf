@@ -452,6 +452,7 @@
 	let unsavedChanges = false;
 	let autoSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 	let pdfUrl: string | null = null;
+	let hasExistingPdfs = false;
 
 	// Global diff state - tracks pending edits for ALL files
 	let globalPendingEdits: Map<string, Array<{
@@ -483,7 +484,10 @@
 	let showEditor = true;
 	let showComments = false;
 	let showPdf = true;
+	let showRightSidebar = false; // New right sidebar state
 	let fileTreeWidth = 256; // 16rem in pixels
+	let rightSidebarWidth = 500; // Width in pixels for right sidebar (increased default)
+	let rightSidebarSplitHeight = 50; // Percentage for comments section (top half)
 	
 	// Panel widths for resizable columns (percentages)
 	let editorPanelWidth = 40; // percentage for editor panel
@@ -491,7 +495,7 @@
 	let pdfPanelWidth = 30; // percentage for PDF panel
 	
 	let isResizing = false;
-	let resizingPanel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat' | 'editor-comments' | 'comments-pdf' | null = null;
+	let resizingPanel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat' | 'editor-comments' | 'comments-pdf' | 'right-sidebar' | 'right-sidebar-split' | null = null;
 	let gitPanelHeight = 40; // percentage for git panel height within sidebar
 
 	// AI Chat Panel state
@@ -558,6 +562,19 @@
 				}
 			}
 		}, 50);
+	}
+
+	// Reactive statement to handle right sidebar toggle and resize
+	$: if (monacoEditor && (showRightSidebar !== undefined || rightSidebarWidth)) {
+		// Use a small delay to ensure DOM has updated after sidebar toggle/resize
+		setTimeout(() => {
+			if (monacoEditor && editorContainer) {
+				const rect = editorContainer.getBoundingClientRect();
+				if (rect.width > 0 && rect.height > 0) {
+					monacoEditor.layout();
+				}
+			}
+		}, 100);
 	}
 
 	// Get current user ID
@@ -630,6 +647,9 @@
 
 		// Automatically open main document if it exists, otherwise show welcome message
 		await autoOpenMainDocument();
+
+		// Check for existing PDFs in the build folder
+		await checkForExistingPdfs();
 
 		// Load comments for this repository
 		if (currentRepoName) {
@@ -805,6 +825,32 @@
 
 		// No main document found, show welcome message
 		showWelcomeMessage();
+	}
+
+	/**
+	 * Check for existing PDFs in the build folder and load the most recent one
+	 */
+	async function checkForExistingPdfs() {
+		if (!currentRepoName) return;
+
+		try {
+			const userId = getCurrentUserId();
+			const result = await apiClient.getBuildPdfs(currentRepoName, userId);
+			
+			if (result.pdfs && result.pdfs.length > 0) {
+				// Use the most recent PDF (first in the sorted list)
+				const mostRecentPdf = result.pdfs[0];
+				pdfUrl = mostRecentPdf.url;
+				hasExistingPdfs = true;
+				console.log(`Found existing PDF: ${mostRecentPdf.path}, size: ${mostRecentPdf.size} bytes, modified: ${mostRecentPdf.modified}`);
+			} else {
+				hasExistingPdfs = false;
+				console.log('No existing PDFs found in build folder');
+			}
+		} catch (error) {
+			hasExistingPdfs = false;
+			console.warn('Failed to check for existing PDFs:', error);
+		}
 	}
 
 	/**
@@ -1060,6 +1106,7 @@ Your content here...
 			if (result.pdfUrl) {
 				// Use relative URL since we're proxying through Vite
 				pdfUrl = result.pdfUrl;
+				hasExistingPdfs = true; // New compilation means we have a PDF
 			}
 
 			console.log('Compilation successful:', result);
@@ -1084,6 +1131,21 @@ Your content here...
 			localStorage.removeItem('currentRepo');
 		}
 		goto('/');
+	}
+
+	function handleDownloadPdf() {
+		if (!pdfUrl) {
+			console.warn('No PDF available for download');
+			return;
+		}
+
+		// Create a temporary anchor element to trigger download
+		const link = document.createElement('a');
+		link.href = pdfUrl;
+		link.download = `${currentRepoName || 'document'}.pdf`;
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
 	}
 
 	async function handleRefreshGitStatus() {
@@ -1790,39 +1852,52 @@ Your content here...
 
 	function toggleComments() {
 		showComments = !showComments;
+		// Auto-show right sidebar when comments are enabled
+		if (showComments && !showRightSidebar) {
+			showRightSidebar = true;
+		}
+		// Auto-hide right sidebar when both comments and AI chat are disabled
+		if (!showComments && !showAiChat && showRightSidebar) {
+			showRightSidebar = false;
+		}
 	}
 
 	function togglePdf() {
 		showPdf = !showPdf;
 	}
 
-	// Calculate the number of visible panels for layout purposes
-	$: visiblePanels = [showEditor, showComments, showPdf].filter(Boolean).length;
+	function toggleRightSidebar() {
+		showRightSidebar = !showRightSidebar;
+		
+		// When opening sidebar, show both comments and AI chat if they were previously enabled
+		if (showRightSidebar) {
+			showComments = true;
+			showAiChat = true;
+		}
+	}
 
-	// Calculate panel widths based on visibility and user preferences
+	// Calculate the number of visible panels for layout purposes (comments moved to sidebar)
+	$: visiblePanels = [showEditor, showPdf].filter(Boolean).length;
+
+	// Calculate panel widths based on visibility and user preferences (comments moved to sidebar)
 	$: panelWidths = (() => {
 		if (visiblePanels === 1) {
 			// Single panel takes full width
 			if (showEditor) return { editor: 100, comments: 0, pdf: 0 };
-			if (showComments) return { editor: 0, comments: 100, pdf: 0 };
 			if (showPdf) return { editor: 0, comments: 0, pdf: 100 };
 		} else if (visiblePanels === 2) {
-			// Two panels - distribute remaining space
-			if (showEditor && showComments) {
-				return { editor: editorPanelWidth, comments: 100 - editorPanelWidth, pdf: 0 };
-			} else if (showEditor && showPdf) {
+			// Two panels - distribute space between editor and PDF
+			if (showEditor && showPdf) {
 				return { editor: editorPanelWidth, comments: 0, pdf: 100 - editorPanelWidth };
-			} else if (showComments && showPdf) {
-				return { editor: 0, comments: commentsPanelWidth, pdf: 100 - commentsPanelWidth };
 			}
-		} else if (visiblePanels === 3) {
-			// Three panels - use all three widths
-			return { editor: editorPanelWidth, comments: commentsPanelWidth, pdf: pdfPanelWidth };
 		}
 		
 		// Fallback to equal distribution
-		return { editor: 100 / visiblePanels, comments: 100 / visiblePanels, pdf: 100 / visiblePanels };
+		return { editor: 50, comments: 0, pdf: 50 };
 	})();
+
+	// Determine if editor should use flex-1 (expand to fill) or fixed width
+	$: editorShouldExpand = showEditor && !showPdf;
 
 	// Comment functions
 	function handleNavigateToComment(event: CustomEvent<Comment>) {
@@ -1970,7 +2045,7 @@ Your content here...
 	let pendingResizeEvent: MouseEvent | null = null;
 
 	function startResize(
-		panel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat' | 'editor-comments' | 'comments-pdf',
+		panel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat' | 'editor-comments' | 'comments-pdf' | 'right-sidebar' | 'right-sidebar-split',
 		event: MouseEvent
 	) {
 		isResizing = true;
@@ -1978,7 +2053,7 @@ Your content here...
 		event.preventDefault();
 
 		// Add performance optimization classes and prevent iframe event capture
-		if (panel === 'editor-pdf') {
+		if (panel === 'editor-pdf' || panel === 'comments-pdf' || panel === 'right-sidebar') {
 			const mainArea = document.querySelector('.main-content-area') as HTMLElement;
 			if (mainArea) {
 				mainArea.style.willChange = 'transform';
@@ -2007,7 +2082,12 @@ Your content here...
 			document.body.appendChild(overlay);
 
 			// Add body class for consistent cursor styling
-			document.body.classList.add('resizing-editor-pdf');
+			const bodyClass = panel === 'editor-pdf' 
+				? 'resizing-editor-pdf' 
+				: panel === 'comments-pdf' 
+					? 'resizing-comments-pdf' 
+					: 'resizing-right-sidebar';
+			document.body.classList.add(bodyClass);
 		}
 
 		document.addEventListener('mousemove', handleResizeThrottled);
@@ -2081,27 +2161,20 @@ Your content here...
 				}
 			}
 		} else if (resizingPanel === 'comments-pdf') {
-			// Resize between comments and PDF panels
+			// Resize between comments and PDF panels - optimized for smooth performance
 			const mainArea = document.querySelector('.main-content-area') as HTMLElement;
 			if (mainArea) {
 				const rect = mainArea.getBoundingClientRect();
 				if (rect.width <= 0) return;
 
-				const relativeX = newX - rect.left;
-				const percentage = (relativeX / rect.width) * 100;
-				
-				// Calculate the position relative to the start of the comments panel
+				// Optimized calculation for smoother performance
 				const editorWidth = editorPanelWidth;
-				const commentsStart = (editorWidth / 100) * rect.width;
-				const relativeToComments = newX - rect.left - commentsStart;
+				const relativeToComments = newX - rect.left - (editorWidth / 100) * rect.width;
 				const commentsPercentage = (relativeToComments / rect.width) * 100;
 				
-				const newCommentsWidth = Math.min(Math.max(commentsPercentage, 15), 60); // 15% to 60% range
-				commentsPanelWidth = newCommentsWidth;
-				
-				// Adjust PDF panel width
-				const remainingWidth = 100 - editorWidth - newCommentsWidth;
-				pdfPanelWidth = Math.max(remainingWidth, 20); // Ensure PDF has at least 20%
+				// Clamp to valid range and update
+				commentsPanelWidth = Math.min(Math.max(commentsPercentage, 15), 60);
+				pdfPanelWidth = 100 - editorWidth - commentsPanelWidth;
 			}
 		} else if (resizingPanel === 'git-split') {
 			// Calculate percentage based on the sidebar height
@@ -2127,11 +2200,29 @@ Your content here...
 				const newHeight = availableHeight - relativeY;
 				aiChatHeight = Math.min(Math.max(newHeight, 200), 800); // 200px to 800px range
 			}
+		} else if (resizingPanel === 'right-sidebar') {
+			// Calculate new width for right sidebar
+			const windowWidth = window.innerWidth;
+			const relativeX = windowWidth - newX; // Distance from right edge
+			const newWidth = Math.min(Math.max(relativeX, 300), 800); // 300px to 800px range (increased for larger default)
+			rightSidebarWidth = newWidth;
+		} else if (resizingPanel === 'right-sidebar-split') {
+			// Calculate percentage for right sidebar split
+			const rightSidebar = document.querySelector('.right-sidebar') as HTMLElement;
+			if (rightSidebar) {
+				const rect = rightSidebar.getBoundingClientRect();
+				const relativeY = newY - rect.top;
+				const percentage = (relativeY / rect.height) * 100;
+				const newHeight = Math.min(Math.max(percentage, 20), 80); // 20% to 80% range
+				rightSidebarSplitHeight = newHeight;
+			}
 		}
 	}
 
 	function stopResize() {
 		const wasEditorPdfResize = resizingPanel === 'editor-pdf';
+		const wasCommentsPdfResize = resizingPanel === 'comments-pdf';
+		const wasRightSidebarResize = resizingPanel === 'right-sidebar';
 		isResizing = false;
 		resizingPanel = null;
 
@@ -2160,11 +2251,11 @@ Your content here...
 			overlay.remove();
 		}
 
-		// Remove body class
-		document.body.classList.remove('resizing-editor-pdf');
+		// Remove body classes
+		document.body.classList.remove('resizing-editor-pdf', 'resizing-comments-pdf', 'resizing-right-sidebar');
 
 		// Debounce Monaco editor layout call for better performance
-		if (monacoEditor && wasEditorPdfResize) {
+		if (monacoEditor && (wasEditorPdfResize || wasRightSidebarResize)) {
 			setTimeout(() => {
 				if (monacoEditor) {
 					monacoEditor.layout();
@@ -2183,7 +2274,7 @@ Your content here...
 
 <div class="h-screen flex flex-col bg-dark-900">
 	<!-- Header -->
-	<header class="bg-dark-800 border-b border-gray-700 px-6 py-4 flex items-center justify-between">
+	<header class="bg-dark-800 border-b border-gray-700 px-6 py-4 flex items-center justify-between relative" style="{showRightSidebar ? `margin-right: ${rightSidebarWidth}px;` : ''}">
 		<div class="flex items-center space-x-4">
 			<button
 				on:click={handleGoHome}
@@ -2205,6 +2296,28 @@ Your content here...
 					<p class="text-sm text-gray-400">{currentRepoName}</p>
 				{/if}
 			</div>
+			<!-- Settings button moved to left side -->
+			<button
+				on:click={handleShowProjectSettings}
+				class="text-gray-400 hover:text-white transition-colors p-2 rounded"
+				title="Project Settings"
+				aria-label="Project Settings"
+			>
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						stroke-width="2"
+						d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+					/>
+					<path
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						stroke-width="2"
+						d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+					/>
+				</svg>
+			</button>
 		</div>
 
 		<div class="flex items-center space-x-4">
@@ -2220,15 +2333,6 @@ Your content here...
 					Editor
 				</button>
 				<button
-					on:click={toggleComments}
-					class="px-3 py-1.5 text-xs rounded transition-colors {showComments
-						? 'bg-blue-600 text-white'
-						: 'text-gray-400 hover:text-white hover:bg-gray-600'}"
-					title="Toggle Comments"
-				>
-					Comments
-				</button>
-				<button
 					on:click={togglePdf}
 					class="px-3 py-1.5 text-xs rounded transition-colors {showPdf
 						? 'bg-blue-600 text-white'
@@ -2239,24 +2343,7 @@ Your content here...
 				</button>
 			</div>
 
-			<!-- AI Chat Toggle -->
-			<button
-				on:click={() => (showAiChat = !showAiChat)}
-				class="text-gray-400 hover:text-white transition-colors p-2 rounded {showAiChat
-					? 'bg-blue-600 text-white'
-					: ''}"
-				title="Toggle AI Chat"
-				aria-label="Toggle AI Chat"
-			>
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path
-						stroke-linecap="round"
-						stroke-linejoin="round"
-						stroke-width="2"
-						d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-					/>
-				</svg>
-			</button>
+
 
 			{#if currentFilePath}
 				<div class="text-sm text-gray-300 flex items-center space-x-2">
@@ -2350,34 +2437,48 @@ Your content here...
 				</button>
 			{/if}
 
-
-			<!-- Settings button -->
+			<!-- Download PDF button -->
 			<button
-				on:click={handleShowProjectSettings}
-				class="text-gray-400 hover:text-white transition-colors p-2 rounded"
-				title="Project Settings"
-				aria-label="Project Settings"
+				on:click={handleDownloadPdf}
+				disabled={!pdfUrl}
+				class="text-gray-400 hover:text-white transition-colors p-2 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+				title="Download PDF"
+				aria-label="Download PDF"
 			>
 				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path
 						stroke-linecap="round"
 						stroke-linejoin="round"
 						stroke-width="2"
-						d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+						d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
 					/>
+				</svg>
+			</button>
+
+		</div>
+
+		<!-- Right Sidebar Toggle - Positioned at absolute right edge -->
+		<button
+			on:click={toggleRightSidebar}
+			class="right-sidebar-toggle-header"
+			title="Toggle Right Sidebar"
+			aria-label="Toggle Right Sidebar"
+		>
+			<div class="carrot {showRightSidebar ? '' : 'rotated'}">
+				<svg class="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 					<path
 						stroke-linecap="round"
 						stroke-linejoin="round"
 						stroke-width="2"
-						d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+						d="M9 5l7 7-7 7"
 					/>
 				</svg>
-			</button>
-		</div>
+			</div>
+		</button>
 	</header>
 
 	<!-- Main Editor Area -->
-	<div class="flex-1 flex flex-col overflow-hidden main-content-wrapper">
+	<div class="flex-1 flex flex-col overflow-hidden main-content-wrapper" style="{showRightSidebar ? `margin-right: ${rightSidebarWidth}px;` : ''}">
 		<div class="flex-1 flex overflow-hidden min-h-0">
 			<!-- File Tree + Git Sidebar -->
 			<aside
@@ -2630,8 +2731,8 @@ Your content here...
 				<!-- Editor -->
 				{#if showEditor}
 					<div
-						class="flex flex-col min-h-0 relative"
-						style="width: {panelWidths.editor}%; transform: translateZ(0); will-change: width;"
+						class="flex flex-col min-h-0 relative {editorShouldExpand ? 'flex-1' : ''}"
+						style="{editorShouldExpand ? '' : `width: ${panelWidths.editor}%; transform: translateZ(0); will-change: width;`}"
 					>
 						{#if currentFilePath}
 							<div
@@ -2667,56 +2768,14 @@ Your content here...
 					</div>
 				{/if}
 
-				<!-- Resize Handle between Editor and Comments -->
-				{#if showEditor && showComments}
-					<button
-						role="separator"
-						aria-label="Resize editor and comments panels"
-						class="w-1 bg-gray-600 cursor-col-resize flex-shrink-0 panel-resize-handle"
-						on:mousedown={(e) => startResize('editor-comments', e)}
-						on:keydown={(e) => {
-							if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-								e.preventDefault();
-								// Keyboard resize logic can be added here
-							}
-						}}
-					></button>
-				{/if}
+				<!-- Editor-Comments resize handle removed (comments moved to sidebar) -->
 
-				<!-- Comments Panel -->
-				{#if showComments}
-					<div
-						class="flex flex-col min-h-0 relative"
-						style="width: {panelWidths.comments}%; transform: translateZ(0); will-change: width;"
-					>
-											<CommentsPanel
-						repoName={currentRepoName || ''}
-						userId={getCurrentUserId()}
-						on:navigateToComment={handleNavigateToComment}
-						on:deleteComment={handleDeleteComment}
-						on:createComment={handleCreateComment}
-					/>
-					</div>
-				{/if}
+				<!-- Comments Panel moved to right sidebar -->
 
-				<!-- Resize Handle between Comments and PDF -->
-				{#if showComments && showPdf}
-					<button
-						role="separator"
-						aria-label="Resize comments and PDF panels"
-						class="w-1 bg-gray-600 cursor-col-resize flex-shrink-0 panel-resize-handle"
-						on:mousedown={(e) => startResize('comments-pdf', e)}
-						on:keydown={(e) => {
-							if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-								e.preventDefault();
-								// Keyboard resize logic can be added here
-							}
-						}}
-					></button>
-				{/if}
+				<!-- Comments-PDF resize handle removed (comments moved to sidebar) -->
 
-				<!-- Resize Handle between Editor and PDF (when comments are hidden) -->
-				{#if showEditor && showPdf && !showComments}
+				<!-- Resize Handle between Editor and PDF -->
+				{#if showEditor && showPdf}
 					<button
 						role="separator"
 						aria-label="Resize editor and PDF panels"
@@ -2736,55 +2795,86 @@ Your content here...
 					<div
 						class="flex flex-col border-l border-gray-700 min-h-0 relative"
 						style="width: {panelWidths.pdf}%; transform: translateZ(0); will-change: width;"
+						class:resizing={isResizing && resizingPanel === 'editor-pdf'}
 					>
-						<div
-							class="relative"
-							style="flex: {showAiChat ? '1 1 auto' : '1 1 0'}; min-height: {showAiChat
-								? '200px'
-								: '0'};"
-						>
-							<PdfPreview {pdfUrl} isLoading={isCompiling} error={compileError} />
+						<div class="relative flex-1 min-h-0">
+							<PdfPreview 
+								{pdfUrl} 
+								isLoading={isCompiling} 
+								error={compileError} 
+								hasExistingPdfs={hasExistingPdfs}
+							/>
 						</div>
 
-						<!-- AI Chat Panel Resize Handle -->
-						{#if showAiChat && showPdf}
-							<button
-								role="separator"
-								aria-label="Resize AI chat panel"
-								class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors border-0 p-0"
-								on:mousedown={(e) => startResize('ai-chat', e)}
-								on:keydown={(e) => {
-									if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-										e.preventDefault();
-										// Keyboard resize logic can be added here
-									}
-								}}
-							></button>
-						{/if}
-
-						<!-- AI Chat Panel (now in PDF column) -->
-						{#if showAiChat && showPdf}
-							<div style="height: {aiChatHeight}px; flex-shrink: 0;">
-								<AiChatPanel
-									isVisible={true}
-									bind:height={aiChatHeight}
-									bind:messages={aiChatMessages}
-									isLoading={aiChatLoading}
-									repoName={currentRepoName || ''}
-									userId={$authStore.user?.id || 'anonymous'}
-									on:heightChange={(e) => (aiChatHeight = e.detail)}
-									on:sendMessage={handleAiChatMessage}
-									on:clearMessages={handleClearAiChat}
-									on:claudeCodeRequired={handleClaudeCodeRequired}
-									on:applyEdit={handleApplyEdit}
-									on:rejectEdit={handleRejectEdit}
-								/>
-							</div>
-						{/if}
+						<!-- AI Chat Panel moved to right sidebar -->
 					</div>
 				{/if}
 			</div>
 		</div>
+
+		<!-- Right Sidebar -->
+		{#if showRightSidebar}
+			<aside
+				class="fixed top-0 right-0 h-full bg-dark-800 border-l border-gray-700 flex flex-col z-50 right-sidebar"
+				style="width: {rightSidebarWidth}px;" 
+				class:resizing={isResizing && resizingPanel === 'right-sidebar'}
+			>
+				<!-- Resize Handle for width -->
+				<button
+					role="separator"
+					aria-label="Resize right sidebar"
+					class="absolute top-0 left-0 w-1 h-full cursor-col-resize hover:bg-blue-500 bg-transparent transition-colors border-0 p-0"
+					on:mousedown={(e) => startResize('right-sidebar', e)}
+					on:keydown={(e) => {
+						if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+							e.preventDefault();
+							// Keyboard resize logic can be added here
+						}
+					}}
+				></button>
+
+				<!-- Comments Panel (Top Half) -->
+				<div class="overflow-hidden" style="height: {rightSidebarSplitHeight}%;">
+					<CommentsPanel
+						repoName={currentRepoName || ''}
+						userId={getCurrentUserId()}
+						on:navigateToComment={handleNavigateToComment}
+						on:deleteComment={handleDeleteComment}
+						on:createComment={handleCreateComment}
+					/>
+				</div>
+
+				<!-- Resize Handle for split -->
+				<button
+					role="separator"
+					aria-label="Resize sidebar split"
+					class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors border-0 p-0"
+					on:mousedown={(e) => startResize('right-sidebar-split', e)}
+					on:keydown={(e) => {
+						if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+							e.preventDefault();
+							// Keyboard resize logic can be added here
+						}
+					}}
+				></button>
+
+				<!-- AI Chat Panel (Bottom Half) -->
+				<div class="flex flex-col" style="height: {100 - rightSidebarSplitHeight}%;">
+					<AiChatPanel
+						isVisible={true}
+						messages={aiChatMessages}
+						isLoading={aiChatLoading}
+						repoName={currentRepoName || ''}
+						userId={$authStore.user?.id || 'anonymous'}
+						on:sendMessage={handleAiChatMessage}
+						on:clearMessages={handleClearAiChat}
+						on:claudeCodeRequired={handleClaudeCodeRequired}
+						on:applyEdit={handleApplyEdit}
+						on:rejectEdit={handleRejectEdit}
+					/>
+				</div>
+			</aside>
+		{/if}
 	</div>
 </div>
 
@@ -2933,12 +3023,52 @@ Your content here...
 	}
 
 	/* Resizing performance optimizations */
-	:global(.resizing-editor-pdf) {
+	:global(.resizing-editor-pdf),
+	:global(.resizing-comments-pdf),
+	:global(.resizing-right-sidebar) {
 		cursor: col-resize !important;
 	}
 
-	:global(.resizing-editor-pdf *) {
+	:global(.resizing-editor-pdf *),
+	:global(.resizing-comments-pdf *),
+	:global(.resizing-right-sidebar *) {
 		pointer-events: none !important;
+	}
+
+	/* Additional performance optimizations during resize */
+	:global(.resizing) {
+		will-change: width !important;
+		transform: translateZ(0) !important;
+	}
+
+	/* Right sidebar toggle button positioning */
+	:global(.right-sidebar-toggle-header) {
+		position: absolute;
+		top: 0; /* Start at top of header */
+		right: 0; /* Right edge of header */
+		height: 100%; /* Full height of header */
+		width: 16px; /* Fixed width - slightly wider for better usability */
+		background-color: #4B5563;
+		transition: background-color 0.2s ease;
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border: none;
+		border-radius: 0;
+		z-index: 10; /* Ensure it's above other content */
+	}
+
+	:global(.right-sidebar-toggle-header:hover) {
+		background-color: #3B82F6;
+	}
+
+	:global(.right-sidebar-toggle-header .carrot) {
+		transition: transform 0.2s ease;
+	}
+
+	:global(.right-sidebar-toggle-header .carrot.rotated) {
+		transform: rotate(180deg);
 	}
 
 	/* Loading spinner */

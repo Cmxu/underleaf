@@ -713,6 +713,75 @@ app.get('/api/files/:userId/:repoName/pdf/*', async (req, res) => {
   }
 });
 
+// Check for existing PDFs in build folder
+app.get('/api/files/:userId/:repoName/build-pdfs', async (req, res) => {
+  try {
+    const { userId, repoName } = req.params;
+    
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+    
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+      
+      // Check for PDFs in the build folder and root directory
+      const { stdout } = await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['sh', '-c', 'find . -name "*.pdf" -type f | head -10']
+      );
+      
+      const pdfFiles = stdout.trim().split('\n').filter(p => p.trim() !== '');
+      
+      if (pdfFiles.length === 0) {
+        return res.json({ pdfs: [] });
+      }
+      
+      // Get file sizes and modification times for each PDF
+      const pdfInfo = [];
+      for (const pdfFile of pdfFiles) {
+        try {
+          const { stdout: statOutput } = await containerService.executeInUserContainer(
+            userId,
+            repoName,
+            ['stat', '-c', '%s %Y', pdfFile]
+          );
+          
+          const [size, mtime] = statOutput.trim().split(' ');
+          const relativePath = pdfFile.startsWith('./') ? pdfFile.slice(2) : pdfFile;
+          
+          pdfInfo.push({
+            path: relativePath,
+            size: parseInt(size),
+            modified: new Date(parseInt(mtime) * 1000).toISOString(),
+            url: `/api/files/${userId}/${repoName}/pdf/${relativePath}`
+          });
+        } catch (statError) {
+          console.warn(`Failed to get info for PDF ${pdfFile}:`, statError);
+          // Continue with other files
+        }
+      }
+      
+      // Sort by modification time (newest first)
+      pdfInfo.sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+      
+      return res.json({ pdfs: pdfInfo });
+      
+    } catch (containerError) {
+      console.error('Container build PDFs check error:', containerError);
+      return res.status(500).json({ error: 'Failed to check build PDFs from container' });
+    }
+    
+  } catch (err) {
+    console.error('Build PDFs check error:', err);
+    return res.status(500).json({ error: 'Failed to check build PDFs' });
+  }
+});
+
 
 function buildFileTreeFromPaths(paths: string[]): any {
   const tree: any[] = [];

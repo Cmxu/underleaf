@@ -60,3 +60,14 @@ See the individual README files in the `frontend/` and `backend/` directories fo
 ## License
 
 MIT License - see LICENSE file for details. 
+
+
+Can you add the ability for suggested edits for comments? The following changes should be made.
+
+1. In the comment bar add a small icon button to suggest an edit for the given comment.
+2. When suggesting an edit, the editor should go into 'diff' mode where deleting text should cause it to be highlighted in red and added text highlighted in green. 
+3. When editing a suggestion, the top bar of the editor should change to say 'Commenting: ' rather than 'Editing: ' and instead of the auto-save enabled writing there should be three buttons: reject, accept, and save. Reject should throw out the suggestion. Accept should make the changes of the suggestion. Save should save the diff then return the editor to editing. 
+4. If a suggestion exists for a comment, there should be a button that lets you review the current suggestion. 
+5. Diffs should be robust, i.e. if more text gets added or removed from the document the diff should still refer to the same locations
+6. When creating a comment the user should be given an option to make a suggestion but can also submit a comment without suggestion
+7. Modify the MCP servers so that AI can add a suggestion to the comment, make sure that the class can robustly handle the new diff structure and allow the AI to interact with it, also add a new MCP function that lets the AI directly add a suggestion to a comment.

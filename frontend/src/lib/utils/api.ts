@@ -431,6 +431,20 @@ class ApiClient {
 			method: 'POST'
 		});
 	}
+
+	async getBuildPdfs(
+		repoName: string,
+		userId = 'anonymous'
+	): Promise<{
+		pdfs: Array<{
+			path: string;
+			size: number;
+			modified: string;
+			url: string;
+		}>;
+	}> {
+		return this.request(`/api/files/${userId}/${repoName}/build-pdfs`);
+	}
 }
 
 export const apiClient = new ApiClient();
