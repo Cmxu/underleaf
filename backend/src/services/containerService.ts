@@ -39,6 +39,29 @@ class ContainerService {
   }
 
   /**
+   * Check if container needs to be recreated due to image changes
+   */
+  private async shouldRecreateContainer(containerId: string): Promise<boolean> {
+    try {
+      const dockerContainer = docker.getContainer(containerId);
+      const info = await dockerContainer.inspect();
+      const currentImageId = info.Image;
+      
+      // Get the current image ID for underleaf-latex:latest
+      const images = await docker.listImages({ filters: { reference: ['underleaf-latex:latest'] } });
+      if (images.length > 0) {
+        const latestImageId = images[0].Id;
+        return currentImageId !== latestImageId;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Failed to check if container needs recreation:', error);
+      return false;
+    }
+  }
+
+  /**
    * Get or create a container for a user
    */
   async getOrCreateUserContainer(userId: string, repoName: string): Promise<UserContainer> {
@@ -51,19 +74,26 @@ class ContainerService {
       // Update last used time
       container.lastUsed = new Date();
       
-      // Check if container is still running
+      // Check if container is still running and doesn't need recreation
       try {
         const dockerContainer = docker.getContainer(container.containerId);
         const info = await dockerContainer.inspect();
         
         if (info.State.Running) {
+          // Check if container needs to be recreated due to image changes
+          if (await this.shouldRecreateContainer(container.containerId)) {
+            console.log(`Container ${container.containerName} needs recreation due to image changes`);
+            await this.removeUserContainer(userId, repoName);
+            // Continue to create new container
+          } else {
+            return container;
+          }
+        } else {
+          // Container exists but not running, restart it
+          await dockerContainer.start();
+          container.status = 'running';
           return container;
         }
-        
-        // Container exists but not running, restart it
-        await dockerContainer.start();
-        container.status = 'running';
-        return container;
       } catch (error) {
         // Container doesn't exist anymore, remove from our map
         this.containers.delete(containerKey);
@@ -280,7 +310,12 @@ class ContainerService {
           "mcp__latex_compile__compile_latex",
           "mcp__latex_compile__check_latex_syntax",
           "mcp__latex_compile__get_latex_log",
-          "mcp__latex_compile__clean_latex_build"
+          "mcp__latex_compile__clean_latex_build",
+          "mcp__underleaf_comments__list_comments",
+          "mcp__underleaf_comments__read_comment",
+          "mcp__underleaf_comments__write_comment",
+          "mcp__underleaf_comments__update_comment",
+          "mcp__underleaf_comments__delete_comment"
         ]
       },
       "mcpServers": {
@@ -291,22 +326,51 @@ class ContainerService {
         "latex_compile": {
           "command": "node",
           "args": ["/usr/local/bin/latex-compile-server.js"]
+        },
+        "underleaf_comments": {
+          "command": "node",
+          "args": ["/usr/local/bin/comments-server.js"]
         }
       }
     };
 
     // Check if MCP dependencies are available
     let useMcp = false;
+    let missingDependencies: string[] = [];
+    
     try {
       // Check if MCP server files exist
-      await this.executeInUserContainer(userId, repoName, ['test', '-f', '/usr/local/bin/permission-prompt-server.js']);
-      await this.executeInUserContainer(userId, repoName, ['test', '-f', '/usr/local/bin/latex-compile-server.js']);
+      const mcpFiles = [
+        '/usr/local/bin/permission-prompt-server.js',
+        '/usr/local/bin/latex-compile-server.js',
+        '/usr/local/bin/comments-server.js'
+      ];
+      
+      for (const file of mcpFiles) {
+        try {
+          await this.executeInUserContainer(userId, repoName, ['test', '-f', file]);
+        } catch (error) {
+          missingDependencies.push(file);
+        }
+      }
+      
       // Check if node is available
-      await this.executeInUserContainer(userId, repoName, ['which', 'node']);
-      useMcp = true;
-      console.log(`MCP dependencies available for ${userId}/${repoName}, using advanced configuration`);
+      try {
+        await this.executeInUserContainer(userId, repoName, ['which', 'node']);
+      } catch (error) {
+        missingDependencies.push('node');
+      }
+      
+      if (missingDependencies.length === 0) {
+        useMcp = true;
+        console.log(`MCP dependencies available for ${userId}/${repoName}, using advanced configuration`);
+      } else {
+        console.log(`MCP dependencies missing for ${userId}/${repoName}:`, missingDependencies.join(', '));
+        console.log('Using basic configuration without MCP features');
+      }
     } catch (error) {
-      console.log(`MCP dependencies not available for ${userId}/${repoName}, using basic configuration:`, error);
+      console.log(`Failed to check MCP dependencies for ${userId}/${repoName}:`, error);
+      console.log('Using basic configuration without MCP features');
     }
 
     const settingsContent = useMcp ? advancedSettingsContent : basicSettingsContent;
@@ -582,6 +646,22 @@ class ContainerService {
       // Remove from our map even if removal failed
       this.containers.delete(containerKey);
     }
+  }
+
+  /**
+   * Force recreation of all containers (useful after image updates)
+   */
+  async forceRecreateAllContainers(): Promise<void> {
+    console.log('Forcing recreation of all containers due to image update...');
+    
+    const containersToRemove = Array.from(this.containers.keys());
+    
+    for (const containerKey of containersToRemove) {
+      const [userId, repoName] = containerKey.split('-', 2);
+      await this.removeUserContainer(userId, repoName);
+    }
+    
+    console.log(`Recreated ${containersToRemove.length} containers with updated image`);
   }
 
   /**

@@ -94,6 +94,46 @@
 	function selectFile(filePath: string) {
 		selectedFile = filePath;
 		onFileSelect(filePath);
+		
+		// Also expand parent folders when manually selecting a file
+		expandParentFolders(filePath);
+	}
+
+	// Expose method to update selection without triggering callback
+	export function updateSelectedFile(filePath: string | null) {
+		selectedFile = filePath;
+		
+		// Only expand parent folders if a file path is provided
+		if (filePath) {
+			expandParentFolders(filePath);
+		}
+	}
+
+	// Function to expand all parent folders of a given file path
+	function expandParentFolders(filePath: string) {
+		if (!filePath || filePath === '') return;
+		
+		// Split the path into parts (excluding the filename)
+		const pathParts = filePath.split('/');
+		const parentPathParts = pathParts.slice(0, -1); // Remove the filename, keep only directories
+		
+		// Expand each parent directory level
+		let currentPath = '';
+		for (const part of parentPathParts) {
+			if (currentPath === '') {
+				currentPath = part;
+			} else {
+				currentPath = `${currentPath}/${part}`;
+			}
+			
+			// Add to expanded directories if not already expanded
+			if (!expandedDirs.has(currentPath)) {
+				expandedDirs.add(currentPath);
+			}
+		}
+		
+		// Trigger reactivity by creating a new Set
+		expandedDirs = new Set(expandedDirs);
 	}
 
 	function showContextMenu(e: MouseEvent, path: string) {
@@ -333,9 +373,6 @@
 					<span class="mr-2">📁</span>
 					File Explorer
 				</h3>
-				{#if repoName}
-					<p class="text-xs text-gray-400 mt-1 truncate">{repoName}</p>
-				{/if}
 			</div>
 			{#if repoName}
 				<div class="flex space-x-1">

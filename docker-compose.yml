@@ -3,7 +3,7 @@ version: '3.8'
 networks:
   web:
     external: false
-  internal:
+  underleaf_web:
     external: false
 
 services:
@@ -18,7 +18,7 @@ services:
       - "8080:8080"  # Traefik dashboard
     networks:
       - web
-      - internal
+      - underleaf_web
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker/traefik:/etc/traefik:ro
@@ -43,9 +43,10 @@ services:
     restart: unless-stopped
     networks:
       - web
-      - internal
+      - underleaf_web
     volumes:
       - ./backend:/app
+      - /app/node_modules  # Preserve node_modules from the image
       - ./repos:/app/repos  # For initial repo cloning and volume initialization
       - /var/run/docker.sock:/var/run/docker.sock  # Allow backend to manage containers
     environment:

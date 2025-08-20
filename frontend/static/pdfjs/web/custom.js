@@ -1,17 +1,17 @@
-// Custom JavaScript to auto-open sidebar with thumbnails on the right
+// Custom JavaScript to keep sidebar closed by default
 document.addEventListener('DOMContentLoaded', function () {
 	// Wait for PDF.js to initialize
 	const initializeSidebar = () => {
-		// Add sidebarOpen class to enable the sidebar
+		// Keep sidebar closed by default - remove the sidebarOpen class
 		const outerContainer = document.getElementById('outerContainer');
 		if (outerContainer) {
-			outerContainer.classList.add('sidebarOpen');
-
-			// Make sure thumbnails are selected
-			const thumbnailButton = document.getElementById('viewThumbnail');
-			if (thumbnailButton && !thumbnailButton.classList.contains('toggled')) {
-				thumbnailButton.click();
-			}
+			// Remove sidebarOpen class to keep sidebar closed
+			outerContainer.classList.remove('sidebarOpen');
+			
+			// Reset to automatic zoom after sidebar is closed
+			setTimeout(() => {
+				resetToAutomaticZoom();
+			}, 100);
 		}
 	};
 
@@ -29,7 +29,24 @@ window.addEventListener('load', function () {
 	setTimeout(() => {
 		const outerContainer = document.getElementById('outerContainer');
 		if (outerContainer) {
-			outerContainer.classList.add('sidebarOpen');
+			// Ensure sidebar stays closed
+			outerContainer.classList.remove('sidebarOpen');
+			
+			// Reset to automatic zoom after sidebar is closed
+			setTimeout(() => {
+				resetToAutomaticZoom();
+			}, 100);
 		}
 	}, 100);
 });
+
+// Function to reset to automatic zoom
+function resetToAutomaticZoom() {
+	// Check if PDFViewerApplication is available
+	if (window.PDFViewerApplication && window.PDFViewerApplication.pdfViewer) {
+		const pdfViewer = window.PDFViewerApplication.pdfViewer;
+		
+		// Set to automatic zoom (this will automatically fit the page to the container)
+		pdfViewer.currentScale = 'auto';
+	}
+}

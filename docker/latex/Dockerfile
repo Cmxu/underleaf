@@ -30,8 +30,10 @@ RUN npm install -g @modelcontextprotocol/sdk
 # Copy MCP servers
 COPY permission-prompt-server.js /usr/local/bin/permission-prompt-server.js
 COPY latex-compile-server.js /usr/local/bin/latex-compile-server.js
+COPY comments-server.js /usr/local/bin/comments-server.js
 RUN chmod +x /usr/local/bin/permission-prompt-server.js
 RUN chmod +x /usr/local/bin/latex-compile-server.js
+RUN chmod +x /usr/local/bin/comments-server.js
 
 # Verify installation
 RUN claude --version || echo "Claude CLI installed but may need configuration"

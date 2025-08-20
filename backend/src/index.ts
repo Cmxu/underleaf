@@ -382,23 +382,104 @@ app.get('/api/files/:userId/:repoName/content', async (req, res) => {
     
     try {
       // Ensure user's container is running
-      await containerService.getOrCreateUserContainer(userId, repoName);
+      const container = await containerService.getOrCreateUserContainer(userId, repoName);
+      const dockerContainer = docker.getContainer(container.containerId);
       
-      // Read file content via container
-      const { stdout } = await containerService.executeInUserContainer(
-        userId, 
-        repoName, 
-        ['cat', filePath]
-      );
-      
-      return res.json({ content: stdout });
-      
-    } catch (containerError) {
-      // Check if it's a "file not found" error
-      if (containerError instanceof Error && containerError.message.includes('No such file')) {
+      // First check if file exists and get its info
+      try {
+        await containerService.executeInUserContainer(
+          userId, 
+          repoName, 
+          ['test', '-f', filePath]
+        );
+      } catch (testError) {
         return res.status(404).json({ error: 'File not found' });
       }
       
+      // Use Docker's native file extraction API for reliability with large files
+      let tarStream;
+      try {
+        tarStream = await dockerContainer.getArchive({
+          path: `/workdir/${filePath}`
+        });
+      } catch (archiveError) {
+        console.error('Failed to get file archive:', archiveError);
+        return res.status(404).json({ error: 'File not found' });
+      }
+      
+      // Extract file content from tar stream
+      const tar = require('tar-stream');
+      const extract = tar.extract();
+      
+      let fileContent = '';
+      let fileFound = false;
+      
+      extract.on('entry', (header: any, stream: any, next: any) => {
+        // Debug logging to understand tar structure
+        console.log(`TAR DEBUG: Entry found - name: "${header.name}", expected: "${filePath}"`);
+        
+        // More flexible path matching for files in subdirectories
+        // The tar header might be: "folder/file.tex", "./folder/file.tex", or just "file.tex"
+        const normalizedHeaderName = header.name.replace(/^\.\//, ''); // Remove leading ./
+        const normalizedFilePath = filePath.replace(/^\.\//, ''); // Remove leading ./
+        
+        const isTargetFile = 
+          normalizedHeaderName === normalizedFilePath ||           // Exact match
+          normalizedHeaderName.endsWith('/' + normalizedFilePath) || // Full path match  
+          (normalizedFilePath.includes('/') && normalizedHeaderName === normalizedFilePath.split('/').pop()) || // Basename match for subdirs
+          header.name === filePath ||                              // Original exact match
+          header.name.endsWith(filePath);                          // Original endsWith match
+        
+        if (isTargetFile) {
+          fileFound = true;
+          console.log(`✅ Extracting file: ${header.name}, size: ${header.size}`);
+          
+          const chunks: Buffer[] = [];
+          stream.on('data', (chunk: Buffer) => {
+            chunks.push(chunk);
+          });
+          
+          stream.on('end', () => {
+            const fileBuffer = Buffer.concat(chunks);
+            fileContent = fileBuffer.toString('utf8');
+            console.log(`File extracted successfully, content length: ${fileContent.length} characters`);
+            
+            // Send the file content
+            res.json({ content: fileContent });
+            next();
+          });
+          
+          stream.on('error', (streamError: Error) => {
+            console.error('File stream error:', streamError);
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Error reading file from container' });
+            }
+            next();
+          });
+        } else {
+          console.log(`⏭️  Skipping file: ${header.name}`);
+          stream.on('end', next);
+          stream.resume(); // Skip other files
+        }
+      });
+      
+      extract.on('error', (extractError: Error) => {
+        console.error('Tar extraction error:', extractError);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to extract file from container' });
+        }
+      });
+      
+      extract.on('finish', () => {
+        if (!fileFound && !res.headersSent) {
+          res.status(404).json({ error: 'File not found in archive' });
+        }
+      });
+      
+      // Pipe the tar stream to the extractor
+      tarStream.pipe(extract);
+      
+    } catch (containerError) {
       console.error('Container file read error:', containerError);
       return res.status(500).json({ error: 'Failed to read file from container' });
     }
@@ -2923,6 +3004,80 @@ app.post('/api/claude', async (req, res) => {
     } catch (err) {
       console.error('Detect main document endpoint error:', err);
       return res.status(500).json({ error: 'Failed to detect main document' });
+    }
+  });
+
+  // Comments API endpoints
+  
+  // Get all comments for a repository
+  app.get('/api/comments/:userId/:repoName', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      
+      // Check if repository volume exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      try {
+        // Read comments from the container's persistent directory
+        const { stdout } = await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['sh', '-c', `mkdir -p .underleaf && cat .underleaf/comments.json 2>/dev/null || echo "[]"`]
+        );
+
+        const comments = JSON.parse(stdout);
+        return res.json({ comments });
+      } catch (containerError) {
+        console.error('Container comments read error:', containerError);
+        return res.json({ comments: [] }); // Return empty array if file doesn't exist
+      }
+    } catch (err) {
+      console.error('Comments get endpoint error:', err);
+      return res.status(500).json({ error: 'Failed to get comments' });
+    }
+  });
+
+  // Sync comments from frontend to backend
+  app.post('/api/comments/:userId/:repoName/sync', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      const { comments } = req.body;
+      
+      if (!Array.isArray(comments)) {
+        return res.status(400).json({ error: 'Comments must be an array' });
+      }
+
+      // Check if repository volume exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      try {
+        // Write comments to the container's persistent directory
+        const commentsJson = JSON.stringify(comments, null, 2);
+        await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['sh', '-c', `mkdir -p .underleaf && cat > .underleaf/comments.json << 'EOF'\n${commentsJson}\nEOF`]
+        );
+
+        console.log(`📝 Synced ${comments.length} comments for ${userId}/${repoName} to persistent storage`);
+        
+        return res.json({ 
+          message: 'Comments synced successfully',
+          count: comments.length 
+        });
+      } catch (containerError) {
+        console.error('Container comments sync error:', containerError);
+        return res.status(500).json({ error: 'Failed to sync comments to container' });
+      }
+    } catch (err) {
+      console.error('Comments sync endpoint error:', err);
+      return res.status(500).json({ error: 'Failed to sync comments' });
     }
   });
 

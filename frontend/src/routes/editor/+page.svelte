@@ -1,13 +1,16 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import FileTree from '$components/FileTree.svelte';
 	import PdfPreview from '$components/PdfPreview.svelte';
 	import AiChatPanel from '$components/AiChatPanel.svelte';
 	import ClaudeCodeModal from '$components/ClaudeCodeModal.svelte';
 	import ProjectSettingsModal from '$components/ProjectSettingsModal.svelte';
+	import CommentsPanel from '$components/CommentsPanel.svelte';
+	import CommentModal from '$components/CommentModal.svelte';
 	import { apiClient } from '$lib/utils/api';
 	import { authStore } from '$lib/stores/auth';
+	import { commentsService, commentsStore, setupAutoSave, type Comment } from '$lib/stores/comments';
 	import type { GitStatusResponse } from '$lib/types/api';
 	
 	// Enhanced diff calculation for Monaco editor integration
@@ -476,12 +479,19 @@
 	let originalFileContents: Map<string, string> = new Map(); // Store original content per file
 	let previewFileContents: Map<string, string> = new Map(); // Store preview content per file
 
-	// Layout state
-	let layoutMode: 'both' | 'editor' | 'pdf' = 'both';
+	// Layout state - now using separate toggles for each panel
+	let showEditor = true;
+	let showComments = false;
+	let showPdf = true;
 	let fileTreeWidth = 256; // 16rem in pixels
-	let editorWidth = 50; // percentage for editor when in 'both' mode
+	
+	// Panel widths for resizable columns (percentages)
+	let editorPanelWidth = 40; // percentage for editor panel
+	let commentsPanelWidth = 30; // percentage for comments panel
+	let pdfPanelWidth = 30; // percentage for PDF panel
+	
 	let isResizing = false;
-	let resizingPanel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat' | null = null;
+	let resizingPanel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat' | 'editor-comments' | 'comments-pdf' | null = null;
 	let gitPanelHeight = 40; // percentage for git panel height within sidebar
 
 	// AI Chat Panel state
@@ -516,6 +526,14 @@
 		version: '1.0'
 	};
 
+	// Comment Modal state
+	let showCommentModal = false;
+	let commentModalSelectedText = '';
+	let commentModalSelection: any = null;
+
+	// FileTree component reference
+	let fileTreeComponent: any = null;
+
 	// Git state
 	let gitStatus: GitStatusResponse | null = null;
 	let isCommitting = false;
@@ -530,7 +548,7 @@
 	let gitError: string | null = null;
 
 	// Reactive statement to handle layout mode changes
-	$: if (monacoEditor && (layoutMode === 'editor' || layoutMode === 'both')) {
+	$: if (monacoEditor && showEditor) {
 		// Use a small delay to ensure DOM has updated
 		setTimeout(() => {
 			if (monacoEditor && editorContainer) {
@@ -610,8 +628,39 @@
 		// Load project settings
 		await loadProjectSettings();
 
+		// Automatically open main document if it exists, otherwise show welcome message
+		await autoOpenMainDocument();
+
+		// Load comments for this repository
+		if (currentRepoName) {
+			// Try to load from backend first (for AI sync), then fallback to localStorage
+			try {
+				await commentsService.loadCommentsFromBackend(currentRepoName, getCurrentUserId());
+			} catch (error) {
+				console.warn('Failed to load comments from backend, loading from localStorage:', error);
+				commentsService.loadComments(currentRepoName);
+			}
+			
+			// Clean up any invalid comments that might exist
+			commentsService.cleanupInvalidComments();
+			
+			setupAutoSave(currentRepoName);
+			
+			// Start real-time polling for AI-generated comments
+			commentsService.startPolling(currentRepoName, getCurrentUserId());
+		}
+
 		// Load git status on mount
 		await handleRefreshGitStatus();
+	});
+
+	// Clean up subscriptions when component is destroyed
+	onDestroy(() => {
+		if (commentHighlightingUnsubscribe) {
+			commentHighlightingUnsubscribe();
+		}
+		// Stop comment polling when component is destroyed
+		commentsService.stopPolling();
 	});
 
 	async function initializeMonaco() {
@@ -644,8 +693,7 @@
 			}
 
 			monacoEditor = monaco.editor.create(editorContainer, {
-				value:
-					'% Welcome to Underleaf!\n% Select a file from the file tree to start editing\n\n\\documentclass{article}\n\\usepackage[utf8]{inputenc}\n\\usepackage[T1]{fontenc}\n\\usepackage{amsmath}\n\\usepackage{amsfonts}\n\\usepackage{amssymb}\n\\usepackage{graphicx}\n\n\\title{Your Document Title}\n\\author{Your Name}\n\\date{\\today}\n\n\\begin{document}\n\n\\maketitle\n\n\\section{Introduction}\n\nYour content here...\n\n\\end{document}',
+				value: '', // Start with empty editor instead of welcome message
 				language: 'latex',
 				theme: 'vs-dark',
 				fontSize: 14,
@@ -662,12 +710,6 @@
 				tabSize: 2,
 				insertSpaces: true
 			});
-
-			// Initialize preview content for the welcome file
-			const initialContent = monacoEditor.getValue();
-			if (currentFilePath) {
-				previewFileContents.set(currentFilePath, initialContent);
-			}
 
 			// Auto-save on content change
 			monacoEditor.onDidChangeModelContent(() => {
@@ -689,6 +731,26 @@
 				handleSaveFile();
 			});
 
+			// Add comment creation keybinding (Ctrl/Cmd + M)
+			monacoEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyM, () => {
+				handleCreateComment();
+			});
+
+			// Add context menu action for creating comments
+			monacoEditor.addAction({
+				id: 'add-comment',
+				label: 'Add Comment',
+				keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyM],
+				contextMenuGroupId: 'navigation',
+				contextMenuOrder: 1.5,
+				run: () => {
+					handleCreateComment();
+				}
+			});
+
+			// Highlight comments in the editor
+			setupCommentHighlighting();
+
 			// Ensure editor layout is correct after initialization
 			setTimeout(() => {
 				if (monacoEditor) {
@@ -698,6 +760,97 @@
 		} catch (error) {
 			console.error('Failed to initialize Monaco Editor:', error);
 		}
+	}
+
+	/**
+	 * Automatically open the main document if it exists, otherwise show welcome message
+	 */
+	async function autoOpenMainDocument() {
+		if (!currentRepoName) {
+			showWelcomeMessage();
+			return;
+		}
+
+		// First check if we have a configured main document
+		if (projectSettings.mainDocument) {
+			try {
+				// Try to open the configured main document
+				await handleFileSelect(projectSettings.mainDocument);
+				console.log(`Automatically opened configured main document: ${projectSettings.mainDocument}`);
+				return;
+			} catch (error) {
+				console.warn(`Failed to open configured main document ${projectSettings.mainDocument}:`, error);
+				// Continue to auto-detection if configured document fails
+			}
+		}
+
+		// Try to auto-detect main document if none is configured
+		try {
+			const userId = getCurrentUserId();
+			const result = await apiClient.detectMainDocument(currentRepoName, userId);
+			
+			if (result.mainDocument) {
+				// Update project settings with detected main document
+				projectSettings.mainDocument = result.mainDocument;
+				await apiClient.saveProjectSettings(currentRepoName, projectSettings, userId);
+				
+				// Open the detected main document
+				await handleFileSelect(result.mainDocument);
+				console.log(`Automatically opened detected main document: ${result.mainDocument}`);
+				return;
+			}
+		} catch (error) {
+			console.warn('Failed to auto-detect main document:', error);
+		}
+
+		// No main document found, show welcome message
+		showWelcomeMessage();
+	}
+
+	/**
+	 * Show welcome message when no main document is available
+	 */
+	function showWelcomeMessage() {
+		if (!monacoEditor) return;
+
+		const welcomeMessage = `% Welcome to Underleaf!
+% Select a file from the file tree to start editing
+
+\\documentclass{article}
+\\usepackage[utf8]{inputenc}
+\\usepackage[T1]{fontenc}
+\\usepackage{amsmath}
+\\usepackage{amsfonts}
+\\usepackage{amssymb}
+\\usepackage{graphicx}
+
+\\title{Your Document Title}
+\\author{Your Name}
+\\date{\\today}
+
+\\begin{document}
+
+\\maketitle
+
+\\section{Introduction}
+
+Your content here...
+
+\\end{document}`;
+
+		monacoEditor.setValue(welcomeMessage);
+		monacoEditor.setModelLanguage(monacoEditor.getModel(), 'latex');
+		
+		// Set current file path to indicate we're showing welcome message
+		currentFilePath = null;
+		unsavedChanges = false;
+		
+		// Clear file tree selection to reflect no file is selected
+		if (fileTreeComponent) {
+			fileTreeComponent.updateSelectedFile(null);
+		}
+		
+		console.log('Showing welcome message - no main document found');
 	}
 
 	async function handleFileSelect(filePath: string) {
@@ -747,6 +900,8 @@
 					if (pendingEdits.length > 0) {
 						updateEditorDecorations();
 					}
+					// Update comment highlighting for the new file
+					setupCommentHighlighting();
 				}, 100);
 			}
 		} catch (err) {
@@ -1542,13 +1697,11 @@
 
 
 	// Layout functions
-	function setLayoutMode(mode: 'both' | 'editor' | 'pdf') {
-		const previousMode = layoutMode;
-		layoutMode = mode;
-
-		// If switching from PDF-only to a mode that includes the editor, recreate the editor
-		if (previousMode === 'pdf' && (mode === 'editor' || mode === 'both')) {
-			console.log('Switching from PDF to editor mode, recreating editor...');
+	function toggleEditor() {
+		showEditor = !showEditor;
+		// If switching to show editor after it was hidden, recreate the editor
+		if (showEditor && monacoEditor) {
+			console.log('Switching to show editor, recreating editor...');
 
 			// Store current content
 			const currentContent = monacoEditor ? monacoEditor.getValue() : '';
@@ -1603,6 +1756,25 @@
 						handleSaveFile();
 					});
 
+					// Re-add comment functionality
+					monacoEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyM, () => {
+						handleCreateComment();
+					});
+
+					monacoEditor.addAction({
+						id: 'add-comment',
+						label: 'Add Comment',
+						keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyM],
+						contextMenuGroupId: 'navigation',
+						contextMenuOrder: 1.5,
+						run: () => {
+							handleCreateComment();
+						}
+					});
+
+					// Re-setup comment highlighting
+					setupCommentHighlighting();
+
 					console.log('Editor recreated successfully');
 				}
 			}, 100);
@@ -1616,12 +1788,189 @@
 		}
 	}
 
+	function toggleComments() {
+		showComments = !showComments;
+	}
+
+	function togglePdf() {
+		showPdf = !showPdf;
+	}
+
+	// Calculate the number of visible panels for layout purposes
+	$: visiblePanels = [showEditor, showComments, showPdf].filter(Boolean).length;
+
+	// Calculate panel widths based on visibility and user preferences
+	$: panelWidths = (() => {
+		if (visiblePanels === 1) {
+			// Single panel takes full width
+			if (showEditor) return { editor: 100, comments: 0, pdf: 0 };
+			if (showComments) return { editor: 0, comments: 100, pdf: 0 };
+			if (showPdf) return { editor: 0, comments: 0, pdf: 100 };
+		} else if (visiblePanels === 2) {
+			// Two panels - distribute remaining space
+			if (showEditor && showComments) {
+				return { editor: editorPanelWidth, comments: 100 - editorPanelWidth, pdf: 0 };
+			} else if (showEditor && showPdf) {
+				return { editor: editorPanelWidth, comments: 0, pdf: 100 - editorPanelWidth };
+			} else if (showComments && showPdf) {
+				return { editor: 0, comments: commentsPanelWidth, pdf: 100 - commentsPanelWidth };
+			}
+		} else if (visiblePanels === 3) {
+			// Three panels - use all three widths
+			return { editor: editorPanelWidth, comments: commentsPanelWidth, pdf: pdfPanelWidth };
+		}
+		
+		// Fallback to equal distribution
+		return { editor: 100 / visiblePanels, comments: 100 / visiblePanels, pdf: 100 / visiblePanels };
+	})();
+
+	// Comment functions
+	function handleNavigateToComment(event: CustomEvent<Comment>) {
+		const comment = event.detail;
+		
+		// Validate the comment file path before attempting navigation
+		if (!commentsService.validateFilePath(comment.fileName)) {
+			console.error('Invalid file path in comment:', comment.fileName);
+			compileError = `Cannot navigate to comment: Invalid file path "${comment.fileName}". This comment may have been created with an invalid path.`;
+			return;
+		}
+		
+		commentsService.setActiveComment(comment);
+		
+		// Navigate to the file if it's different from current
+		if (comment.fileName !== currentFilePath) {
+			handleFileSelect(comment.fileName);
+			
+			// Update file tree selection to highlight the current file
+			if (fileTreeComponent) {
+				fileTreeComponent.updateSelectedFile(comment.fileName);
+			}
+		}
+		
+		// Wait for file to load, then navigate to line
+		setTimeout(() => {
+			if (monacoEditor) {
+				monacoEditor.revealLineInCenter(comment.startLine);
+				monacoEditor.setPosition({ lineNumber: comment.startLine, column: comment.startColumn });
+				monacoEditor.focus();
+			}
+		}, 100);
+	}
+
+	function handleDeleteComment(event: CustomEvent<string>) {
+		const commentId = event.detail;
+		commentsService.deleteComment(commentId);
+		// Note: Comment highlighting will be automatically updated through the store subscription
+	}
+
+	function handleCreateComment() {
+		if (!monacoEditor || !currentFilePath) {
+			// Could show a toast notification here instead of alert
+			console.warn('Please select a file and some text to add a comment.');
+			return;
+		}
+
+		const selection = monacoEditor.getSelection();
+		if (!selection || selection.isEmpty()) {
+			// Could show a toast notification here instead of alert
+			console.warn('Please select some text to add a comment.');
+			return;
+		}
+
+		// Store selection data and show modal
+		commentModalSelection = selection;
+		commentModalSelectedText = monacoEditor.getModel()?.getValueInRange(selection) || '';
+		showCommentModal = true;
+	}
+
+	function handleCommentModalSave(event: CustomEvent<{ content: string; editingComment: Comment | null }>) {
+		const { content } = event.detail;
+		
+		if (commentModalSelection && currentFilePath) {
+			commentsService.addComment({
+				fileName: currentFilePath,
+				startLine: commentModalSelection.startLineNumber,
+				startColumn: commentModalSelection.startColumn,
+				endLine: commentModalSelection.endLineNumber,
+				endColumn: commentModalSelection.endColumn,
+				selectedText: commentModalSelectedText,
+				content: content,
+				author: $authStore.user?.email || 'Anonymous'
+			});
+		}
+		
+		// Close modal and reset state
+		showCommentModal = false;
+		commentModalSelection = null;
+		commentModalSelectedText = '';
+	}
+
+	function handleCommentModalCancel() {
+		showCommentModal = false;
+		commentModalSelection = null;
+		commentModalSelectedText = '';
+	}
+
+	// Setup comment highlighting in Monaco editor
+	let commentDecorationIds: string[] = [];
+	let commentHighlightingUnsubscribe: (() => void) | null = null;
+	
+	function setupCommentHighlighting() {
+		if (!monacoEditor) return;
+
+		// Clear existing subscription to avoid memory leaks
+		if (commentHighlightingUnsubscribe) {
+			commentHighlightingUnsubscribe();
+		}
+
+		// Subscribe to comments store to update highlights when comments change
+		commentHighlightingUnsubscribe = commentsStore.subscribe((state) => {
+			if (!monacoEditor || !currentFilePath) return;
+
+			// Filter comments for current file
+			const fileComments = state.comments.filter(c => c.fileName === currentFilePath);
+			
+			// Create decorations for each comment
+			const decorations = fileComments.map(comment => ({
+				range: new monaco.Range(
+					comment.startLine, 
+					comment.startColumn, 
+					comment.endLine, 
+					comment.endColumn
+				),
+				options: {
+					className: 'comment-highlight',
+					hoverMessage: { value: `💬 **${comment.author}**: ${comment.content}` },
+					minimap: {
+						color: '#ffeb3b',
+						position: 2 // monaco.editor.MinimapPosition.Inline
+					},
+					overviewRuler: {
+						color: '#ffeb3b',
+						position: 4 // monaco.editor.OverviewRulerLane.Right
+					},
+					stickiness: 1 // monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges
+				}
+			}));
+
+			// Apply decorations, properly replacing previous ones
+			commentDecorationIds = monacoEditor.deltaDecorations(commentDecorationIds, decorations);
+		});
+	}
+
+	// Function to clear comment highlighting
+	function clearCommentHighlighting() {
+		if (monacoEditor && commentDecorationIds.length > 0) {
+			commentDecorationIds = monacoEditor.deltaDecorations(commentDecorationIds, []);
+		}
+	}
+
 	// Performance-optimized resize functions with GPU acceleration
 	let rafId: number | null = null;
 	let pendingResizeEvent: MouseEvent | null = null;
 
 	function startResize(
-		panel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat',
+		panel: 'filetree' | 'editor-pdf' | 'git-split' | 'ai-chat' | 'editor-comments' | 'comments-pdf',
 		event: MouseEvent
 	) {
 		isResizing = true;
@@ -1706,7 +2055,53 @@
 				const newWidth = Math.min(Math.max(percentage, 20), 80); // 20% to 80% range
 
 				// Always update to allow smooth bidirectional resizing
-				editorWidth = newWidth;
+				editorPanelWidth = newWidth;
+			}
+		} else if (resizingPanel === 'editor-comments') {
+			// Resize between editor and comments panels
+			const mainArea = document.querySelector('.main-content-area') as HTMLElement;
+			if (mainArea) {
+				const rect = mainArea.getBoundingClientRect();
+				if (rect.width <= 0) return;
+
+				const relativeX = newX - rect.left;
+				const percentage = (relativeX / rect.width) * 100;
+				const newWidth = Math.min(Math.max(percentage, 25), 70); // 25% to 70% range
+
+				editorPanelWidth = newWidth;
+				// Adjust other panels proportionally
+				const remainingWidth = 100 - newWidth;
+				if (showComments && showPdf) {
+					commentsPanelWidth = remainingWidth * 0.4;
+					pdfPanelWidth = remainingWidth * 0.6;
+				} else if (showComments) {
+					commentsPanelWidth = remainingWidth;
+				} else if (showPdf) {
+					pdfPanelWidth = remainingWidth;
+				}
+			}
+		} else if (resizingPanel === 'comments-pdf') {
+			// Resize between comments and PDF panels
+			const mainArea = document.querySelector('.main-content-area') as HTMLElement;
+			if (mainArea) {
+				const rect = mainArea.getBoundingClientRect();
+				if (rect.width <= 0) return;
+
+				const relativeX = newX - rect.left;
+				const percentage = (relativeX / rect.width) * 100;
+				
+				// Calculate the position relative to the start of the comments panel
+				const editorWidth = editorPanelWidth;
+				const commentsStart = (editorWidth / 100) * rect.width;
+				const relativeToComments = newX - rect.left - commentsStart;
+				const commentsPercentage = (relativeToComments / rect.width) * 100;
+				
+				const newCommentsWidth = Math.min(Math.max(commentsPercentage, 15), 60); // 15% to 60% range
+				commentsPanelWidth = newCommentsWidth;
+				
+				// Adjust PDF panel width
+				const remainingWidth = 100 - editorWidth - newCommentsWidth;
+				pdfPanelWidth = Math.max(remainingWidth, 20); // Ensure PDF has at least 20%
 			}
 		} else if (resizingPanel === 'git-split') {
 			// Calculate percentage based on the sidebar height
@@ -1816,29 +2211,29 @@
 			<!-- Layout Toggle Buttons -->
 			<div class="flex items-center space-x-1 bg-dark-700 rounded p-1">
 				<button
-					on:click={() => setLayoutMode('editor')}
-					class="px-3 py-1.5 text-xs rounded transition-colors {layoutMode === 'editor'
+					on:click={toggleEditor}
+					class="px-3 py-1.5 text-xs rounded transition-colors {showEditor
 						? 'bg-blue-600 text-white'
 						: 'text-gray-400 hover:text-white hover:bg-gray-600'}"
-					title="Editor only"
+					title="Toggle Editor"
 				>
 					Editor
 				</button>
 				<button
-					on:click={() => setLayoutMode('both')}
-					class="px-3 py-1.5 text-xs rounded transition-colors {layoutMode === 'both'
+					on:click={toggleComments}
+					class="px-3 py-1.5 text-xs rounded transition-colors {showComments
 						? 'bg-blue-600 text-white'
 						: 'text-gray-400 hover:text-white hover:bg-gray-600'}"
-					title="Side by side"
+					title="Toggle Comments"
 				>
-					Both
+					Comments
 				</button>
 				<button
-					on:click={() => setLayoutMode('pdf')}
-					class="px-3 py-1.5 text-xs rounded transition-colors {layoutMode === 'pdf'
+					on:click={togglePdf}
+					class="px-3 py-1.5 text-xs rounded transition-colors {showPdf
 						? 'bg-blue-600 text-white'
 						: 'text-gray-400 hover:text-white hover:bg-gray-600'}"
-					title="PDF only"
+					title="Toggle PDF"
 				>
 					PDF
 				</button>
@@ -1995,6 +2390,7 @@
 					style="height: {100 - gitPanelHeight}%;"
 				>
 					<FileTree
+						bind:this={fileTreeComponent}
 						repoName={currentRepoName}
 						userId={getCurrentUserId()}
 						onFileSelect={handleFileSelect}
@@ -2232,12 +2628,10 @@
 			<!-- Main Content Area (Editor + PDF) -->
 			<div class="flex-1 flex main-content-area min-h-0" style="contain: layout style;">
 				<!-- Editor -->
-				{#if layoutMode === 'editor' || layoutMode === 'both'}
+				{#if showEditor}
 					<div
-						class="flex flex-col {layoutMode === 'both' ? '' : 'flex-1'} min-h-0"
-						style={layoutMode === 'both'
-							? `width: ${editorWidth}%; transform: translateZ(0); will-change: width;`
-							: 'transform: translateZ(0);'}
+						class="flex flex-col min-h-0 relative"
+						style="width: {panelWidths.editor}%; transform: translateZ(0); will-change: width;"
 					>
 						{#if currentFilePath}
 							<div
@@ -2273,13 +2667,60 @@
 					</div>
 				{/if}
 
-				<!-- Resize Handle between Editor and PDF -->
-				{#if layoutMode === 'both'}
+				<!-- Resize Handle between Editor and Comments -->
+				{#if showEditor && showComments}
+					<button
+						role="separator"
+						aria-label="Resize editor and comments panels"
+						class="w-1 bg-gray-600 cursor-col-resize flex-shrink-0 panel-resize-handle"
+						on:mousedown={(e) => startResize('editor-comments', e)}
+						on:keydown={(e) => {
+							if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+								e.preventDefault();
+								// Keyboard resize logic can be added here
+							}
+						}}
+					></button>
+				{/if}
+
+				<!-- Comments Panel -->
+				{#if showComments}
+					<div
+						class="flex flex-col min-h-0 relative"
+						style="width: {panelWidths.comments}%; transform: translateZ(0); will-change: width;"
+					>
+											<CommentsPanel
+						repoName={currentRepoName || ''}
+						userId={getCurrentUserId()}
+						on:navigateToComment={handleNavigateToComment}
+						on:deleteComment={handleDeleteComment}
+						on:createComment={handleCreateComment}
+					/>
+					</div>
+				{/if}
+
+				<!-- Resize Handle between Comments and PDF -->
+				{#if showComments && showPdf}
+					<button
+						role="separator"
+						aria-label="Resize comments and PDF panels"
+						class="w-1 bg-gray-600 cursor-col-resize flex-shrink-0 panel-resize-handle"
+						on:mousedown={(e) => startResize('comments-pdf', e)}
+						on:keydown={(e) => {
+							if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+								e.preventDefault();
+								// Keyboard resize logic can be added here
+							}
+						}}
+					></button>
+				{/if}
+
+				<!-- Resize Handle between Editor and PDF (when comments are hidden) -->
+				{#if showEditor && showPdf && !showComments}
 					<button
 						role="separator"
 						aria-label="Resize editor and PDF panels"
-						class="w-1 bg-gray-600 hover:bg-blue-500 cursor-col-resize transition-colors relative border-0 p-0"
-						style="transform: translateZ(0); will-change: background-color;"
+						class="w-1 bg-gray-600 cursor-col-resize flex-shrink-0 panel-resize-handle"
 						on:mousedown={(e) => startResize('editor-pdf', e)}
 						on:keydown={(e) => {
 							if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -2291,12 +2732,10 @@
 				{/if}
 
 				<!-- PDF Preview -->
-				{#if layoutMode === 'pdf' || layoutMode === 'both'}
+				{#if showPdf}
 					<div
-						class="flex flex-col border-l border-gray-700 {layoutMode === 'both' ? '' : 'flex-1'} min-h-0"
-						style={layoutMode === 'both'
-							? `width: ${100 - editorWidth}%; transform: translateZ(0); will-change: width;`
-							: 'transform: translateZ(0);'}
+						class="flex flex-col border-l border-gray-700 min-h-0 relative"
+						style="width: {panelWidths.pdf}%; transform: translateZ(0); will-change: width;"
 					>
 						<div
 							class="relative"
@@ -2308,7 +2747,7 @@
 						</div>
 
 						<!-- AI Chat Panel Resize Handle -->
-						{#if showAiChat && (layoutMode === 'pdf' || layoutMode === 'both')}
+						{#if showAiChat && showPdf}
 							<button
 								role="separator"
 								aria-label="Resize AI chat panel"
@@ -2324,7 +2763,7 @@
 						{/if}
 
 						<!-- AI Chat Panel (now in PDF column) -->
-						{#if showAiChat && (layoutMode === 'pdf' || layoutMode === 'both')}
+						{#if showAiChat && showPdf}
 							<div style="height: {aiChatHeight}px; flex-shrink: 0;">
 								<AiChatPanel
 									isVisible={true}
@@ -2368,6 +2807,16 @@
 	on:save={handleSaveProjectSettings}
 />
 
+<!-- Comment Modal -->
+<CommentModal
+	isVisible={showCommentModal}
+	selectedText={commentModalSelectedText}
+	fileName={currentFilePath || ''}
+	author={$authStore.user?.email || 'Anonymous'}
+	on:save={handleCommentModalSave}
+	on:cancel={handleCommentModalCancel}
+/>
+
 <style>
 	/* Monaco Editor Diff Decorations */
 	:global(.pending-edit-decoration) {
@@ -2375,6 +2824,19 @@
 		border: 2px solid rgba(255, 152, 0, 0.6) !important;
 		border-radius: 3px !important;
 		box-shadow: 0 0 4px rgba(255, 152, 0, 0.3) !important;
+	}
+
+	/* Panel Resize Handles */
+	:global(.panel-resize-handle) {
+		transition: background-color 0.2s ease;
+	}
+
+	:global(.panel-resize-handle:hover) {
+		background-color: #3b82f6 !important;
+	}
+
+	:global(.panel-resize-handle:active) {
+		background-color: #1d4ed8 !important;
 	}
 
 	:global(.pending-edit-line-decoration) {
@@ -2490,5 +2952,16 @@
 	@keyframes spin {
 		0% { transform: rotate(0deg); }
 		100% { transform: rotate(360deg); }
+	}
+
+	/* Comment highlighting */
+	:global(.monaco-editor .comment-highlight) {
+		background-color: rgba(70, 171, 104, 0.2) !important;
+		border: 1px solid rgba(70, 171, 104, 0.01);
+		border-radius: 2px;
+	}
+
+	:global(.monaco-editor .comment-highlight:hover) {
+		background-color: rgba(70, 171, 104, 0.3) !important;
 	}
 </style>

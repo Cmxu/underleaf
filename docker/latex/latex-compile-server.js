@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
-const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
-const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js');
+const { Server } = require('/usr/lib/node_modules/@modelcontextprotocol/sdk/dist/cjs/server/index.js');
+const { StdioServerTransport } = require('/usr/lib/node_modules/@modelcontextprotocol/sdk/dist/cjs/server/stdio.js');
+const { CallToolRequestSchema, ListToolsRequestSchema } = require('/usr/lib/node_modules/@modelcontextprotocol/sdk/dist/cjs/types.js');
 const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');

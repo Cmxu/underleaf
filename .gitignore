@@ -45,3 +45,6 @@ test_pdf*.pdf
 
 # Docker
 .dockerignore
+
+# Underleaf local settings and comments
+.underleaf/

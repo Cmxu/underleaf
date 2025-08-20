@@ -5,12 +5,12 @@
  * This server provides tools to handle permission prompts in the Underleaf AI chat
  */
 
-const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
-const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
+const { Server } = require('/usr/lib/node_modules/@modelcontextprotocol/sdk/dist/cjs/server/index.js');
+const { StdioServerTransport } = require('/usr/lib/node_modules/@modelcontextprotocol/sdk/dist/cjs/server/stdio.js');
 const {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-} = require('@modelcontextprotocol/sdk/types.js');
+} = require('/usr/lib/node_modules/@modelcontextprotocol/sdk/dist/cjs/types.js');
 const fs = require('fs').promises;
 const path = require('path');
 
