@@ -305,17 +305,17 @@ class ContainerService {
           "WebFetch",
           "WebSearch",
           "Write",
-          "mcp__underleaf_permissions__permission_prompt",
-          "mcp__underleaf_permissions__wait_for_permission",
-          "mcp__latex_compile__compile_latex",
-          "mcp__latex_compile__check_latex_syntax",
-          "mcp__latex_compile__get_latex_log",
-          "mcp__latex_compile__clean_latex_build",
-          "mcp__underleaf_comments__list_comments",
-          "mcp__underleaf_comments__read_comment",
-          "mcp__underleaf_comments__write_comment",
-          "mcp__underleaf_comments__update_comment",
-          "mcp__underleaf_comments__delete_comment"
+          "mcp__underleaf_permissions__request_user_approval",
+          "mcp__underleaf_permissions__wait_for_user_response",
+          "mcp__latex_compile__build_latex_document",
+          "mcp__latex_compile__validate_latex_syntax",
+          "mcp__latex_compile__show_compilation_log",
+          "mcp__latex_compile__cleanup_build_files",
+          "mcp__underleaf_comments__show_all_comments",
+          "mcp__underleaf_comments__view_comment_details",
+          "mcp__underleaf_comments__add_comment",
+          "mcp__underleaf_comments__edit_comment",
+          "mcp__underleaf_comments__remove_comment"
         ]
       },
       "mcpServers": {

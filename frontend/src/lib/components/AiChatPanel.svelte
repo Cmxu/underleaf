@@ -26,6 +26,23 @@
 	// Animate typing dots
 	let typingInterval: NodeJS.Timeout | null = null;
 	
+	// Utility function to extract user-friendly tool name from MCP identifier
+	function getFriendlyToolName(toolName: string): string {
+		// If it's an MCP tool (contains double underscores), extract the last part
+		if (toolName.includes('__')) {
+			const parts = toolName.split('__');
+			return parts[parts.length - 1];
+		}
+		// Otherwise return the original name
+		return toolName;
+	}
+	
+	// Test cases for the utility function:
+	// getFriendlyToolName('mcp__underleaf_comments__add_comment') → 'add_comment'
+	// getFriendlyToolName('mcp__latex_compile__build_latex_document') → 'build_latex_document'
+	// getFriendlyToolName('mcp__underleaf_permissions__request_user_approval') → 'request_user_approval'
+	// getFriendlyToolName('Edit') → 'Edit' (non-MCP tools remain unchanged)
+	
 	$: if (isLoading) {
 		if (!typingInterval) {
 			typingInterval = setInterval(() => {
@@ -571,7 +588,7 @@
 												>
 													<div class="flex items-center space-x-2">
 														<span class="text-orange-400">🔧</span>
-														<span class="text-sm font-medium text-gray-200">Tool Call: {block.toolCall.name}</span>
+														<span class="text-sm font-medium text-gray-200">Tool Call: {getFriendlyToolName(block.toolCall.name)}</span>
 														{#if block.toolCall.editDiff}
 															<span class="text-xs px-2 py-1 bg-blue-600 text-blue-100 rounded">Edit</span>
 														{/if}

@@ -89,10 +89,10 @@ class UnderleafMCPServer {
 **Purpose:** Provide LaTeX compilation tools and document processing
 
 **Tools:**
-- `compile_latex`: Compile LaTeX source to PDF
-- `validate_syntax`: Check LaTeX syntax
-- `get_packages`: List available LaTeX packages
-- `optimize_document`: Suggest LaTeX optimizations
+- `build_latex_document`: Compile LaTeX source to PDF
+- `validate_latex_syntax`: Check LaTeX syntax
+- `show_compilation_log`: Show compilation logs
+- `cleanup_build_files`: Clean up build artifacts
 
 **Resources:**
 - `templates`: Access LaTeX document templates

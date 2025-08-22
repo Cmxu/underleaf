@@ -54,6 +54,12 @@
 		<div 
 			class="bg-dark-800 rounded-lg shadow-xl max-w-md w-full"
 			on:click|stopPropagation
+			on:keydown={(e) => {
+				if (e.key === 'Enter' || e.key === ' ') {
+					e.stopPropagation();
+				}
+			}}
+			role="document"
 		>
 			<!-- Header -->
 			<div class="p-6 pb-4">

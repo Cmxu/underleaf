@@ -36,7 +36,7 @@ class PermissionPromptServer {
       return {
         tools: [
           {
-            name: 'permission_prompt',
+            name: 'request_user_approval',
             description: 'Create a permission prompt in the AI chat panel for user approval',
             inputSchema: {
               type: 'object',
@@ -69,7 +69,7 @@ class PermissionPromptServer {
             },
           },
           {
-            name: 'wait_for_permission',
+            name: 'wait_for_user_response',
             description: 'Wait for user permission response',
             inputSchema: {
               type: 'object',
@@ -93,9 +93,9 @@ class PermissionPromptServer {
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       switch (request.params.name) {
-        case 'permission_prompt':
+        case 'request_user_approval':
           return await this.handlePermissionPrompt(request.params.arguments);
-        case 'wait_for_permission':
+        case 'wait_for_user_response':
           return await this.handleWaitForPermission(request.params.arguments);
         default:
           throw new Error(`Unknown tool: ${request.params.name}`);

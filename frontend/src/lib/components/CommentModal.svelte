@@ -96,10 +96,17 @@
 		role="dialog"
 		aria-labelledby="comment-modal-title"
 		aria-modal="true"
+		tabindex="0"
 	>
 		<div 
 			class="bg-dark-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-hidden"
 			on:click|stopPropagation
+			on:keydown={(e) => {
+				if (e.key === 'Enter' || e.key === ' ') {
+					e.stopPropagation();
+				}
+			}}
+			role="document"
 		>
 			<!-- Header -->
 			<div class="flex items-center justify-between p-6 border-b border-gray-700">
@@ -155,8 +162,7 @@
 							placeholder="Enter your comment..."
 							rows="4"
 							class="w-full px-3 py-2 bg-dark-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-vertical"
-							autofocus
-							bind:this={textareaElement}
+								bind:this={textareaElement}
 						></textarea>
 					{/key}
 					<div class="text-xs text-gray-400">

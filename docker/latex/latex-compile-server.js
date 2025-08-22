@@ -35,7 +35,7 @@ class LaTeXCompileServer {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: [
         {
-          name: 'compile_latex',
+          name: 'build_latex_document',
           description: 'Compile a LaTeX document with specified engine and options',
           inputSchema: {
             type: 'object',
@@ -70,7 +70,7 @@ class LaTeXCompileServer {
           }
         },
         {
-          name: 'check_latex_syntax',
+          name: 'validate_latex_syntax',
           description: 'Check LaTeX file for syntax errors without full compilation',
           inputSchema: {
             type: 'object',
@@ -84,7 +84,7 @@ class LaTeXCompileServer {
           }
         },
         {
-          name: 'get_latex_log',
+          name: 'show_compilation_log',
           description: 'Retrieve and parse the LaTeX compilation log for errors and warnings',
           inputSchema: {
             type: 'object',
@@ -101,7 +101,7 @@ class LaTeXCompileServer {
           }
         },
         {
-          name: 'clean_latex_build',
+          name: 'cleanup_build_files',
           description: 'Clean LaTeX auxiliary files (.aux, .log, .out, etc.)',
           inputSchema: {
             type: 'object',
@@ -127,13 +127,13 @@ class LaTeXCompileServer {
 
       try {
         switch (name) {
-          case 'compile_latex':
+          case 'build_latex_document':
             return await this.handleCompileLatex(args);
-          case 'check_latex_syntax':
+          case 'validate_latex_syntax':
             return await this.handleCheckSyntax(args);
-          case 'get_latex_log':
+          case 'show_compilation_log':
             return await this.handleGetLog(args);
-          case 'clean_latex_build':
+          case 'cleanup_build_files':
             return await this.handleCleanBuild(args);
           default:
             throw new Error(`Unknown tool: ${name}`);

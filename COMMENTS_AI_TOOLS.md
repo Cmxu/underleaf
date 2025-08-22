@@ -13,7 +13,7 @@ The comments system now includes an MCP (Model Context Protocol) server that pro
 
 ## Available Tools
 
-### 1. `list_comments`
+### 1. `show_all_comments`
 Lists all comments in the repository, with optional filtering and sorting.
 
 **Parameters:**
@@ -26,7 +26,7 @@ Lists all comments in the repository, with optional filtering and sorting.
 List all comments in the repository sorted by creation date
 ```
 
-### 2. `read_comment`
+### 2. `view_comment_details`
 Reads the full details of a specific comment.
 
 **Parameters:**
@@ -37,7 +37,7 @@ Reads the full details of a specific comment.
 Read the details of comment with ID "comment_1234567890_abc123"
 ```
 
-### 3. `write_comment`
+### 3. `add_comment`
 Creates a new comment on a specific file and location.
 
 **Parameters:**
@@ -55,7 +55,7 @@ Creates a new comment on a specific file and location.
 Add a comment to line 15 of main.tex suggesting an improvement to the introduction
 ```
 
-### 4. `update_comment`
+### 4. `edit_comment`
 Updates the content of an existing comment.
 
 **Parameters:**
@@ -67,7 +67,7 @@ Updates the content of an existing comment.
 Update comment "comment_1234567890_abc123" with revised feedback
 ```
 
-### 5. `delete_comment`
+### 5. `remove_comment`
 Deletes a comment by its ID.
 
 **Parameters:**
@@ -139,8 +139,8 @@ Add explanatory comments to help understand the complex mathematical notation in
 ## Example Workflow
 
 1. **User loads a LaTeX document** → Comments are synchronized to the backend
-2. **User asks Claude to review** → Claude uses `list_comments` to see existing feedback
-3. **Claude analyzes the document** → Claude uses `write_comment` to add suggestions
+2. **User asks Claude to review** → Claude uses `show_all_comments` to see existing feedback
+3. **Claude analyzes the document** → Claude uses `add_comment` to add suggestions
 4. **Comments appear in UI** → Comments are synchronized back to frontend and displayed
 5. **User responds to AI comments** → New comments are synchronized for AI to see
 6. **Iterative improvement** → Continuous collaboration between user and AI

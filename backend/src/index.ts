@@ -1483,7 +1483,15 @@ app.get('/api/claude/setup', async (req, res) => {
         ['claude', 'config', 'list']
       );
       
-      const config = JSON.parse(configOutput);
+      let config;
+      try {
+        config = JSON.parse(configOutput.trim());
+      } catch (parseError) {
+        console.error('Failed to parse Claude config as JSON:', parseError);
+        console.error('Raw configOutput:', configOutput);
+        // Return empty config as fallback
+        config = {};
+      }
       
       return res.json({
         configured: !!process.env.ANTHROPIC_API_KEY,
@@ -2564,11 +2572,18 @@ app.post('/api/claude', async (req, res) => {
             const { stdout: settingsContent } = await containerService.executeInUserContainer(
               userId, repoName, ['cat', '.claude/settings.json']
             );
-            const settings = JSON.parse(settingsContent);
+            let settings;
+            try {
+              settings = JSON.parse(settingsContent.trim());
+            } catch (parseError) {
+              console.warn('Failed to parse Claude settings as JSON:', parseError);
+              console.warn('Raw settingsContent:', settingsContent);
+              // Skip MCP configuration if settings can't be parsed
+            }
             
-            if (settings.mcpServers && Object.keys(settings.mcpServers).length > 0) {
+            if (settings && settings.mcpServers && Object.keys(settings.mcpServers).length > 0) {
               claudeCmd.push('--mcp-config', '.claude/settings.json');
-              claudeCmd.push('--permission-prompt-tool', 'mcp__underleaf_permissions__permission_prompt');
+              claudeCmd.push('--permission-prompt-tool', 'mcp__underleaf_permissions__request_user_approval');
               console.log('🔧 Using MCP configuration with permission prompt tool');
             } else {
               console.log('📝 Settings file exists but no MCP servers configured, skipping MCP configuration');
@@ -3097,7 +3112,15 @@ app.post('/api/claude', async (req, res) => {
           ['sh', '-c', `mkdir -p .underleaf && cat .underleaf/comments.json 2>/dev/null || echo "[]"`]
         );
 
-        const comments = JSON.parse(stdout);
+        let comments;
+        try {
+          comments = JSON.parse(stdout.trim());
+        } catch (parseError) {
+          console.error('Failed to parse comments as JSON:', parseError);
+          console.error('Raw stdout:', stdout);
+          // Return empty array as fallback
+          comments = [];
+        }
         return res.json({ comments });
       } catch (containerError) {
         console.error('Container comments read error:', containerError);
@@ -3150,6 +3173,71 @@ app.post('/api/claude', async (req, res) => {
     }
   });
 
+  // Update comment positions when text changes occur
+  app.post('/api/comments/:userId/:repoName/update-positions', async (req, res) => {
+    try {
+      const { userId, repoName } = req.params;
+      const { file_path, changes } = req.body;
+      
+      if (!file_path || !Array.isArray(changes)) {
+        return res.status(400).json({ error: 'file_path and changes array are required' });
+      }
+      
+      // Check if repository volume exists
+      const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+      if (!volumeInfo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+      
+      try {
+        // Prepare the MCP call arguments
+        const mcpArgs = JSON.stringify({
+          file_path,
+          changes
+        });
+        
+        // Call the comments MCP server to update positions
+        const { stdout } = await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['node', '/usr/local/bin/comments-server.js'],
+          `{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "update_comment_positions", "arguments": ${mcpArgs}}}`
+        );
+        
+        // Validate stdout before parsing
+        if (!stdout || !stdout.trim()) {
+          console.error('Empty stdout from container execution');
+          return res.status(500).json({ error: 'No response from comment position update service' });
+        }
+        
+        let response;
+        try {
+          response = JSON.parse(stdout.trim());
+        } catch (parseError) {
+          console.error('Failed to parse container response as JSON:', parseError);
+          console.error('Raw stdout:', stdout);
+          return res.status(500).json({ error: 'Invalid response format from comment position update service' });
+        }
+        
+        if (response.error) {
+          console.error('MCP update positions error:', response.error);
+          return res.status(500).json({ error: 'Failed to update comment positions' });
+        }
+        
+        return res.json({ 
+          message: 'Comment positions updated successfully',
+          result: response.result 
+        });
+      } catch (containerError) {
+        console.error('Container position update error:', containerError);
+        return res.status(500).json({ error: 'Failed to update positions in container' });
+      }
+    } catch (err) {
+      console.error('Position update endpoint error:', err);
+      return res.status(500).json({ error: 'Failed to update comment positions' });
+    }
+  });
+
   // Permission prompt endpoints
   
   // Get pending permission prompts
@@ -3182,8 +3270,15 @@ app.post('/api/claude', async (req, res) => {
                   repoName,
                   ['cat', file]
                 );
-                const promptData = JSON.parse(content);
-                prompts.push(promptData);
+                let promptData;
+                try {
+                  promptData = JSON.parse(content.trim());
+                  prompts.push(promptData);
+                } catch (parseError) {
+                  console.warn('Failed to parse permission prompt file as JSON:', file, parseError);
+                  console.warn('Raw content:', content);
+                  // Skip this file and continue with others
+                }
               } catch (error) {
                 console.warn('Failed to read permission prompt file:', file, error);
               }

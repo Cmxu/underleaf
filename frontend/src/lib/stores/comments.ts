@@ -18,41 +18,57 @@ export interface CommentStore {
   comments: Comment[];
   activeComment: Comment | null;
   lastSyncTime: Date | null;
-  isPolling: boolean;
+  isLoading: boolean;
 }
 
 const initialState: CommentStore = {
   comments: [],
   activeComment: null,
   lastSyncTime: null,
-  isPolling: false
+  isLoading: false
 };
 
 export const commentsStore = writable<CommentStore>(initialState);
 
-// Polling interval (in milliseconds) - check for new comments every 2 seconds
-const POLL_INTERVAL = 2000;
-let pollIntervalId: NodeJS.Timeout | null = null;
-
 export const commentsService = {
-  // Validate file path to ensure it's safe for backend access
+  // Validate and normalize file path to ensure it's safe for backend access
   validateFilePath(filePath: string): boolean {
-    // Check if file path is safe (no directory traversal, no absolute paths)
-    const isValid = Boolean(filePath && 
-           !filePath.includes('..') && 
-           !filePath.startsWith('/') && 
-           !filePath.startsWith('./') &&
-           filePath.trim() !== '');
+    if (!filePath || filePath.trim() === '') {
+      return false;
+    }
     
-    if (!isValid && filePath) {
-      console.warn(`🚫 Invalid file path detected: "${filePath}"`);
+    // Normalize the path by removing /workdir/ prefix if present (from AI comments)
+    let normalizedPath = filePath.trim();
+    if (normalizedPath.startsWith('/workdir/')) {
+      normalizedPath = normalizedPath.substring('/workdir/'.length);
+    }
+    
+    // Check if normalized path is safe (no directory traversal, no absolute paths)
+    const isValid = Boolean(normalizedPath && 
+           !normalizedPath.includes('..') && 
+           !normalizedPath.startsWith('/') && 
+           !normalizedPath.startsWith('./'));
+    
+    if (!isValid) {
+      console.warn(`🚫 Invalid file path detected: "${filePath}" (normalized: "${normalizedPath}")`);
     }
     
     return isValid;
   },
 
-  // Add a new comment
-  addComment(comment: Omit<Comment, 'id' | 'createdAt' | 'updatedAt'>) {
+  // Normalize file path by removing /workdir/ prefix if present
+  normalizeFilePath(filePath: string): string {
+    if (!filePath) return filePath;
+    
+    if (filePath.startsWith('/workdir/')) {
+      return filePath.substring('/workdir/'.length);
+    }
+    
+    return filePath;
+  },
+
+  // Add a new comment (saves to backend immediately)
+  async addComment(repoName: string, comment: Omit<Comment, 'id' | 'createdAt' | 'updatedAt'>, userId: string = 'anonymous') {
     // Validate file path before adding comment
     if (!this.validateFilePath(comment.fileName)) {
       console.error('Invalid file path for comment:', comment.fileName);
@@ -61,11 +77,13 @@ export const commentsService = {
 
     const newComment: Comment = {
       ...comment,
+      fileName: this.normalizeFilePath(comment.fileName),
       id: crypto.randomUUID(),
       createdAt: new Date(),
       updatedAt: new Date()
     };
 
+    // Add to local store optimistically
     commentsStore.update(state => ({
       ...state,
       comments: [...state.comments, newComment].sort((a, b) => 
@@ -73,28 +91,90 @@ export const commentsService = {
       )
     }));
 
+    // Save to backend immediately
+    try {
+      await this.saveCommentsToBackend(repoName, userId);
+      console.log('💾 Comment added and saved to backend:', newComment.id);
+    } catch (error) {
+      // Rollback on error
+      commentsStore.update(state => ({
+        ...state,
+        comments: state.comments.filter(c => c.id !== newComment.id)
+      }));
+      console.error('Failed to save comment to backend:', error);
+      throw error;
+    }
+
     return newComment;
   },
 
-  // Delete a comment
-  deleteComment(commentId: string) {
-    commentsStore.update(state => ({
-      ...state,
-      comments: state.comments.filter(c => c.id !== commentId),
-      activeComment: state.activeComment?.id === commentId ? null : state.activeComment
-    }));
+  // Delete a comment (saves to backend immediately)
+  async deleteComment(repoName: string, commentId: string, userId: string = 'anonymous') {
+    // Store the comment for potential rollback
+    let deletedComment: Comment | null = null;
+    
+    commentsStore.update(state => {
+      deletedComment = state.comments.find(c => c.id === commentId) || null;
+      return {
+        ...state,
+        comments: state.comments.filter(c => c.id !== commentId),
+        activeComment: state.activeComment?.id === commentId ? null : state.activeComment
+      };
+    });
+
+    // Save to backend immediately
+    try {
+      await this.saveCommentsToBackend(repoName, userId);
+      console.log('🗑️ Comment deleted and saved to backend:', commentId);
+    } catch (error) {
+      // Rollback on error
+      if (deletedComment) {
+        commentsStore.update(state => ({
+          ...state,
+          comments: [...state.comments, deletedComment].sort((a, b) => 
+            new Date(a.createdAt).getTime() - new Date(a.createdAt).getTime()
+          )
+        }));
+      }
+      console.error('Failed to delete comment from backend:', error);
+      throw error;
+    }
   },
 
-  // Update a comment
-  updateComment(commentId: string, updates: Partial<Omit<Comment, 'id' | 'createdAt'>>) {
-    commentsStore.update(state => ({
-      ...state,
-      comments: state.comments.map(c => 
-        c.id === commentId 
-          ? { ...c, ...updates, updatedAt: new Date() }
-          : c
-      )
-    }));
+  // Update a comment (saves to backend immediately)
+  async updateComment(repoName: string, commentId: string, updates: Partial<Omit<Comment, 'id' | 'createdAt'>>, userId: string = 'anonymous') {
+    // Store original comment for potential rollback
+    let originalComment: Comment | null = null;
+    
+    commentsStore.update(state => {
+      originalComment = state.comments.find(c => c.id === commentId) || null;
+      return {
+        ...state,
+        comments: state.comments.map(c => 
+          c.id === commentId 
+            ? { ...c, ...updates, updatedAt: new Date() }
+            : c
+        )
+      };
+    });
+
+    // Save to backend immediately
+    try {
+      await this.saveCommentsToBackend(repoName, userId);
+      console.log('✏️ Comment updated and saved to backend:', commentId);
+    } catch (error) {
+      // Rollback on error
+      if (originalComment) {
+        commentsStore.update(state => ({
+          ...state,
+          comments: state.comments.map(c => 
+            c.id === commentId ? originalComment : c
+          )
+        }));
+      }
+      console.error('Failed to update comment in backend:', error);
+      throw error;
+    }
   },
 
   // Set active comment (for navigation)
@@ -114,133 +194,15 @@ export const commentsService = {
     return comments;
   },
 
-  // Get all comments with valid file paths only
-  getValidComments(): Comment[] {
-    let comments: Comment[] = [];
-    commentsStore.subscribe(state => {
-      comments = state.comments.filter(c => this.validateFilePath(c.fileName));
-    })();
-    return comments;
-  },
-
-  // Get comments with invalid file paths (for debugging)
-  getInvalidComments(): Comment[] {
-    let comments: Comment[] = [];
-    commentsStore.subscribe(state => {
-      comments = state.comments.filter(c => !this.validateFilePath(c.fileName));
-    })();
-    return comments;
-  },
-
-  // Clean up invalid comments (remove comments with invalid file paths)
-  cleanupInvalidComments() {
-    commentsStore.update(state => {
-      const validComments = state.comments.filter(c => this.validateFilePath(c.fileName));
-      const removedCount = state.comments.length - validComments.length;
-      
-      if (removedCount > 0) {
-        console.warn(`🧹 Cleaned up ${removedCount} comments with invalid file paths`);
-      }
-      
-      return {
-        ...state,
-        comments: validComments
-      };
-    });
-  },
-
-  // Clean up and save comments (useful for manual cleanup)
-  cleanupAndSaveComments(repoName: string) {
-    this.cleanupInvalidComments();
-    this.saveComments(repoName);
-  },
-
   // Clear all comments
   clearComments() {
     commentsStore.set(initialState);
   },
 
-  // Load comments from localStorage or backend
-  loadComments(repoName: string) {
-    try {
-      const saved = localStorage.getItem(`comments_${repoName}`);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        // Filter out comments with invalid file paths
-        const validComments = parsed.filter((c: any) => this.validateFilePath(c.fileName));
-        
-        if (validComments.length !== parsed.length) {
-          console.warn(`Filtered out ${parsed.length - validComments.length} comments with invalid file paths`);
-        }
-        
-        const comments = validComments.map((c: any) => ({
-          ...c,
-          createdAt: new Date(c.createdAt),
-          updatedAt: new Date(c.updatedAt)
-        }));
-        
-        commentsStore.update(state => ({
-          ...state,
-          comments: comments.sort((a: Comment, b: Comment) => 
-            new Date(a.createdAt).getTime() - new Date(a.createdAt).getTime()
-          )
-        }));
-
-        // Clean up any remaining invalid comments
-        this.cleanupInvalidComments();
-      }
-    } catch (error) {
-      console.error('Failed to load comments:', error);
-    }
-  },
-
-  // Save comments to localStorage
-  saveComments(repoName: string) {
-    let currentComments: Comment[] = [];
-    commentsStore.subscribe(state => {
-      currentComments = state.comments;
-    })();
+  // Load comments from backend when repository loads
+  async loadComments(repoName: string, userId: string = 'anonymous') {
+    commentsStore.update(state => ({ ...state, isLoading: true }));
     
-    try {
-      localStorage.setItem(`comments_${repoName}`, JSON.stringify(currentComments));
-      
-      // Also sync to backend for AI access
-      this.syncCommentsToBackend(repoName, currentComments).catch(error => {
-        console.warn('Failed to sync comments to backend:', error);
-      });
-    } catch (error) {
-      console.error('Failed to save comments:', error);
-    }
-  },
-
-  // Sync comments to backend for AI access
-  async syncCommentsToBackend(repoName: string, comments: Comment[]) {
-    try {
-      // Get current user ID (this should match how it's done elsewhere in the app)
-      const userId = 'anonymous'; // TODO: Get actual user ID from auth store
-      
-      const response = await fetch(`/api/comments/${userId}/${repoName}/sync`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ comments }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const result = await response.json();
-      console.log('📝 Comments synced to backend:', result);
-    } catch (error) {
-      console.error('Failed to sync comments to backend:', error);
-      throw error;
-    }
-  },
-
-  // Load comments from backend (for AI synchronization)
-  async loadCommentsFromBackend(repoName: string, userId: string = 'anonymous') {
     try {
       const response = await fetch(`/api/comments/${userId}/${repoName}`);
       
@@ -251,8 +213,13 @@ export const commentsService = {
       const result = await response.json();
       const comments = result.comments || [];
       
-      // Filter out comments with invalid file paths
-      const validComments = comments.filter((c: any) => this.validateFilePath(c.fileName));
+      // Filter out comments with invalid file paths and normalize paths
+      const validComments = comments
+        .filter((c: any) => this.validateFilePath(c.fileName))
+        .map((c: any) => ({
+          ...c,
+          fileName: this.normalizeFilePath(c.fileName)
+        }));
       
       if (validComments.length !== comments.length) {
         console.warn(`Filtered out ${comments.length - validComments.length} comments with invalid file paths from backend`);
@@ -269,134 +236,143 @@ export const commentsService = {
         comments: parsedComments.sort((a: Comment, b: Comment) =>
           new Date(a.createdAt).getTime() - new Date(a.createdAt).getTime()
         ),
-        lastSyncTime: new Date()
+        lastSyncTime: new Date(),
+        isLoading: false
       }));
 
       console.log('📥 Loaded comments from backend:', parsedComments.length);
       return parsedComments;
     } catch (error) {
       console.error('Failed to load comments from backend:', error);
+      commentsStore.update(state => ({ ...state, isLoading: false }));
       return [];
     }
   },
 
-  // Sync comments from backend and merge with local comments (for real-time updates)
-  async syncWithBackend(repoName: string, userId: string = 'anonymous') {
+  // Save all current comments to backend
+  async saveCommentsToBackend(repoName: string, userId: string = 'anonymous') {
+    let currentComments: Comment[] = [];
+    commentsStore.subscribe(state => {
+      currentComments = state.comments;
+    })();
+    
     try {
-      const response = await fetch(`/api/comments/${userId}/${repoName}`);
-      
+      const response = await fetch(`/api/comments/${userId}/${repoName}/sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ comments: currentComments }),
+      });
+
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const result = await response.json();
-      const backendComments = result.comments || [];
+      console.log('📝 Comments synced to backend:', result);
       
-      // Filter out comments with invalid file paths
-      const validBackendComments = backendComments.filter((c: any) => this.validateFilePath(c.fileName));
-      
-      if (validBackendComments.length !== backendComments.length) {
-        console.warn(`Filtered out ${backendComments.length - validBackendComments.length} comments with invalid file paths from backend sync`);
-      }
-      
-      const parsedBackendComments = validBackendComments.map((c: any) => ({
-        ...c,
-        createdAt: new Date(c.createdAt),
-        updatedAt: new Date(c.updatedAt)
-      }));
-
-      // Get current comments from store
-      let currentComments: Comment[] = [];
-      commentsStore.subscribe(state => {
-        currentComments = state.comments;
-      })();
-
-      // Find new comments (comments in backend that aren't in frontend)
-      const currentIds = new Set(currentComments.map((c: Comment) => c.id));
-      const newComments = parsedBackendComments.filter((c: Comment) => !currentIds.has(c.id));
-
-      if (newComments.length > 0) {
-        console.log(`🆕 Found ${newComments.length} new comments from AI:`, newComments.map((c: Comment) => c.content.substring(0, 50)));
-        
-        // Merge new comments with existing ones
-        const mergedComments = [...currentComments, ...newComments].sort((a: Comment, b: Comment) =>
-          new Date(a.createdAt).getTime() - new Date(a.createdAt).getTime()
-        );
-
-        commentsStore.update(state => ({
-          ...state,
-          comments: mergedComments,
-          lastSyncTime: new Date()
-        }));
-
-        // Save merged comments to localStorage
-        localStorage.setItem(`comments_${repoName}`, JSON.stringify(mergedComments));
-
-        return newComments;
-      }
-
-      // Just update sync time if no new comments
+      // Update sync time
       commentsStore.update(state => ({
         ...state,
         lastSyncTime: new Date()
       }));
-
-      return [];
+      
+      return result;
     } catch (error) {
-      console.error('Failed to sync with backend:', error);
+      console.error('Failed to sync comments to backend:', error);
+      throw error;
+    }
+  },
+
+  // Refresh comments from backend (for AI comment detection)
+  async refreshComments(repoName: string, userId: string = 'anonymous') {
+    console.log('🔄 Refreshing comments from backend');
+    
+    commentsStore.update(state => ({ ...state, isLoading: true }));
+    
+    try {
+      const comments = await this.loadComments(repoName, userId);
+      console.log(`📥 Refreshed ${comments.length} comments from backend`);
+      return comments;
+    } catch (error) {
+      console.error('Failed to refresh comments:', error);
+      commentsStore.update(state => ({ ...state, isLoading: false }));
       return [];
     }
   },
 
-  // Start polling for new comments (real-time sync)
-  startPolling(repoName: string, userId: string = 'anonymous') {
-    // Don't start multiple polling intervals
-    if (pollIntervalId) {
-      return;
-    }
-
-    console.log('🔄 Starting comment polling for real-time AI comment sync');
+  // Initialize comments when repository loads
+  async initializeSync(repoName: string, userId: string = 'anonymous') {
+    console.log('🔄 Initializing comments for repository:', repoName);
     
+    try {
+      await this.loadComments(repoName, userId);
+    } catch (error) {
+      console.warn('Initial comments load error:', error);
+    }
+  },
+
+  // Cleanup sync resources
+  cleanupSync() {
     commentsStore.update(state => ({
       ...state,
-      isPolling: true
+      isLoading: false
     }));
-
-    // Start polling interval
-    pollIntervalId = setInterval(async () => {
-      try {
-        await this.syncWithBackend(repoName, userId);
-      } catch (error) {
-        console.warn('Polling sync error:', error);
-      }
-    }, POLL_INTERVAL);
+    
+    console.log('⏹️ Cleaned up comment sync');
   },
 
-  // Stop polling for new comments
-  stopPolling() {
-    if (pollIntervalId) {
-      clearInterval(pollIntervalId);
-      pollIntervalId = null;
-      
-      commentsStore.update(state => ({
-        ...state,
-        isPolling: false
-      }));
-
-      console.log('⏹️ Stopped comment polling');
+  // Trigger refresh from external components (e.g., AI chat)
+  async triggerRefresh(repoName: string, userId: string = 'anonymous') {
+    console.log('🔄 External refresh triggered for comments');
+    
+    try {
+      const comments = await this.refreshComments(repoName, userId);
+      return comments;
+    } catch (error) {
+      console.error('Failed to trigger refresh:', error);
+      throw error;
     }
   },
 
-  // Manual refresh to force sync
-  async refreshComments(repoName: string, userId: string = 'anonymous') {
-    console.log('🔄 Manually refreshing comments from backend');
-    return await this.syncWithBackend(repoName, userId);
-  }
-};
+  // Update comment positions when text changes occur
+  async updateCommentPositions(repoName: string, filePath: string, changes: Array<{
+    start_line: number;
+    start_column: number;
+    end_line: number;
+    end_column: number;
+    lines_added: number;
+    lines_content?: string[];
+  }>, userId: string = 'anonymous') {
+    console.log('📍 Updating comment positions for file:', filePath, 'with', changes.length, 'changes');
+    
+    try {
+      const response = await fetch(`/api/comments/${userId}/${repoName}/update-positions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          file_path: filePath, 
+          changes 
+        }),
+      });
 
-// Auto-save comments when they change
-export function setupAutoSave(repoName: string) {
-  return commentsStore.subscribe(() => {
-    commentsService.saveComments(repoName);
-  });
-} 
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      console.log('📍 Comment positions updated:', result);
+      
+      // Refresh comments from backend to get updated positions
+      await this.loadComments(repoName, userId);
+      
+      return result;
+    } catch (error) {
+      console.error('Failed to update comment positions:', error);
+      throw error;
+    }
+  }
+}; 

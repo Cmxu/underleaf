@@ -43,7 +43,7 @@ class CommentsServer {
       return {
         tools: [
           {
-            name: 'list_comments',
+            name: 'show_all_comments',
             description: 'List all comments in the repository, optionally filtered by file',
             inputSchema: {
               type: 'object',
@@ -69,7 +69,7 @@ class CommentsServer {
             }
           },
           {
-            name: 'read_comment',
+            name: 'view_comment_details',
             description: 'Read a specific comment by its ID',
             inputSchema: {
               type: 'object',
@@ -83,7 +83,7 @@ class CommentsServer {
             }
           },
           {
-            name: 'write_comment',
+            name: 'add_comment',
             description: 'Create a new comment on a specific file and location',
             inputSchema: {
               type: 'object',
@@ -128,7 +128,7 @@ class CommentsServer {
             }
           },
           {
-            name: 'update_comment',
+            name: 'edit_comment',
             description: 'Update an existing comment content',
             inputSchema: {
               type: 'object',
@@ -139,14 +139,14 @@ class CommentsServer {
                 },
                 content: {
                   type: 'string',
-                  description: 'The new comment content'
+                  description: 'New content for the comment'
                 }
               },
               required: ['comment_id', 'content']
             }
           },
           {
-            name: 'delete_comment',
+            name: 'remove_comment',
             description: 'Delete a comment by its ID',
             inputSchema: {
               type: 'object',
@@ -158,6 +158,57 @@ class CommentsServer {
               },
               required: ['comment_id']
             }
+          },
+          {
+            name: 'update_comment_positions',
+            description: 'Update comment positions when text changes occur in a file',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                file_path: {
+                  type: 'string',
+                  description: 'Path to the file where text changes occurred'
+                },
+                changes: {
+                  type: 'array',
+                  description: 'Array of text changes that occurred',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      start_line: {
+                        type: 'integer',
+                        description: 'Starting line number where change began (1-based)'
+                      },
+                      start_column: {
+                        type: 'integer',
+                        description: 'Starting column number where change began (1-based)'
+                      },
+                      end_line: {
+                        type: 'integer',
+                        description: 'Ending line number where change ended (1-based)'
+                      },
+                      end_column: {
+                        type: 'integer',
+                        description: 'Ending column number where change ended (1-based)'
+                      },
+                      lines_added: {
+                        type: 'integer',
+                        description: 'Number of lines added (positive) or removed (negative)'
+                      },
+                      lines_content: {
+                        type: 'array',
+                        description: 'Content of the new lines (for additions)',
+                        items: {
+                          type: 'string'
+                        }
+                      }
+                    },
+                    required: ['start_line', 'start_column', 'end_line', 'end_column', 'lines_added']
+                  }
+                }
+              },
+              required: ['file_path', 'changes']
+            }
           }
         ]
       };
@@ -168,16 +219,18 @@ class CommentsServer {
 
       try {
         switch (name) {
-          case 'list_comments':
+          case 'show_all_comments':
             return await this.listComments(args);
-          case 'read_comment':
+          case 'view_comment_details':
             return await this.readComment(args);
-          case 'write_comment':
+          case 'add_comment':
             return await this.writeComment(args);
-          case 'update_comment':
+          case 'edit_comment':
             return await this.updateComment(args);
-          case 'delete_comment':
+          case 'remove_comment':
             return await this.deleteComment(args);
+          case 'update_comment_positions':
+            return await this.updateCommentPositions(args);
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -522,12 +575,229 @@ Content: ${deletedComment.content}`;
     };
   }
 
+  async updateCommentPositions(args) {
+    const comments = await this.getCommentsData();
+    const { file_path, changes } = args;
+    
+    // Find all comments for the specified file
+    const fileComments = comments.filter(c => c.fileName === file_path);
+    
+    if (fileComments.length === 0) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `No comments found for file: ${file_path}`
+          }
+        ]
+      };
+    }
+    
+    // Sort changes by line number (reverse order to process from bottom to top)
+    // This ensures that line number adjustments don't affect subsequent changes
+    const sortedChanges = changes.sort((a, b) => b.start_line - a.start_line);
+    
+    let updatedCount = 0;
+    
+    // Process each comment
+    for (const comment of fileComments) {
+      let newStartLine = comment.startLine;
+      let newStartColumn = comment.startColumn;
+      let newEndLine = comment.endLine;
+      let newEndColumn = comment.endColumn;
+      let positionChanged = false;
+      
+      // Apply each change to this comment's position
+      for (const change of sortedChanges) {
+        const { start_line, start_column, end_line, end_column, lines_added } = change;
+        
+        // Check if comment is affected by this change
+        const isCommentAfterChange = comment.startLine > end_line || 
+          (comment.startLine === end_line && comment.startColumn >= end_column);
+        
+        const isCommentOverlappingChange = (
+          (comment.startLine >= start_line && comment.startLine <= end_line) ||
+          (comment.endLine >= start_line && comment.endLine <= end_line) ||
+          (comment.startLine < start_line && comment.endLine > end_line)
+        );
+        
+        if (isCommentAfterChange) {
+          // Comment is completely after the change - adjust line numbers
+          if (lines_added !== 0) {
+            newStartLine += lines_added;
+            newEndLine += lines_added;
+            positionChanged = true;
+          }
+        } else if (isCommentOverlappingChange) {
+          // Comment overlaps with the change area
+          if (comment.startLine >= start_line && comment.startLine <= end_line) {
+            // Comment starts within the changed area
+            if (lines_added > 0) {
+              // Text was added - move comment after the addition
+              newStartLine = start_line + lines_added;
+              newStartColumn = 1; // Reset to beginning of line
+              
+              // Adjust end position relative to new start
+              const originalSpan = comment.endLine - comment.startLine;
+              newEndLine = newStartLine + originalSpan;
+              if (originalSpan === 0) {
+                newEndColumn = comment.endColumn;
+              }
+              positionChanged = true;
+            } else if (lines_added < 0) {
+              // Text was removed - check if comment should be moved
+              const removedLines = Math.abs(lines_added);
+              if (comment.startLine > start_line + removedLines) {
+                // Comment was after the removed section
+                newStartLine = comment.startLine + lines_added;
+                newEndLine = comment.endLine + lines_added;
+                positionChanged = true;
+              } else {
+                // Comment was within or partially within removed section
+                // Move it to just after the change point
+                newStartLine = start_line;
+                newStartColumn = start_column;
+                newEndLine = start_line;
+                newEndColumn = start_column + (comment.selectedText?.length || 0);
+                positionChanged = true;
+              }
+            }
+          }
+        }
+        
+        // Handle column adjustments for same-line changes
+        if (comment.startLine === start_line && comment.startLine === end_line) {
+          if (comment.startColumn >= end_column) {
+            // Comment is after the change on the same line
+            const charactersChanged = (change.lines_content?.[0]?.length || 0) - (end_column - start_column);
+            newStartColumn += charactersChanged;
+            newEndColumn += charactersChanged;
+            positionChanged = true;
+          } else if (comment.startColumn >= start_column && comment.startColumn < end_column) {
+            // Comment starts within the changed text on the same line
+            newStartColumn = start_column;
+            if (change.lines_content?.[0]) {
+              newEndColumn = start_column + change.lines_content[0].length;
+            }
+            positionChanged = true;
+          }
+        }
+      }
+      
+      // Update the comment if position changed
+      if (positionChanged) {
+        const commentIndex = comments.findIndex(c => c.id === comment.id);
+        if (commentIndex !== -1) {
+          comments[commentIndex].startLine = Math.max(1, newStartLine);
+          comments[commentIndex].startColumn = Math.max(1, newStartColumn);
+          comments[commentIndex].endLine = Math.max(1, newEndLine);
+          comments[commentIndex].endColumn = Math.max(1, newEndColumn);
+          comments[commentIndex].updatedAt = new Date().toISOString();
+          updatedCount++;
+        }
+      }
+    }
+    
+    // Save the updated comments
+    const saved = await this.saveCommentsData(comments);
+    
+    if (!saved) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: 'Failed to save updated comment positions.'
+          }
+        ],
+        isError: true
+      };
+    }
+    
+    const result = `Comment positions updated successfully!
+File: ${file_path}
+Changes processed: ${changes.length}
+Comments updated: ${updatedCount} out of ${fileComments.length}
+Comments for this file: ${fileComments.length}`;
+    
+    return {
+      content: [
+        {
+          type: 'text',
+          text: result
+        }
+      ]
+    };
+  }
+
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     console.error('Comments MCP Server running on stdio');
   }
+
+  async runOneShot(jsonInput) {
+    try {
+      const request = JSON.parse(jsonInput);
+      if (request.method === 'tools/call') {
+        const { name, arguments: args } = request.params;
+        
+        switch (name) {
+          case 'show_all_comments':
+            return await this.listComments(args);
+          case 'view_comment_details':
+            return await this.readComment(args);
+          case 'add_comment':
+            return await this.writeComment(args);
+          case 'edit_comment':
+            return await this.updateComment(args);
+          case 'remove_comment':
+            return await this.deleteComment(args);
+          case 'update_comment_positions':
+            return await this.updateCommentPositions(args);
+          default:
+            throw new Error(`Unknown tool: ${name}`);
+        }
+      } else {
+        throw new Error(`Unsupported method: ${request.method}`);
+      }
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Error: ${error.message}`
+          }
+        ],
+        isError: true
+      };
+    }
+  }
 }
 
 const server = new CommentsServer();
-server.run().catch(console.error); 
+
+// Check if we're running in one-shot mode (stdin input provided)
+if (process.stdin.isTTY === false) {
+  // Read from stdin for one-shot execution
+  let stdinInput = '';
+  process.stdin.on('data', (chunk) => {
+    stdinInput += chunk;
+  });
+  
+  process.stdin.on('end', async () => {
+    try {
+      const result = await server.runOneShot(stdinInput.trim());
+      console.log(JSON.stringify(result));
+      process.exit(0);
+    } catch (error) {
+      console.error(JSON.stringify({
+        content: [{ type: 'text', text: `Error: ${error.message}` }],
+        isError: true
+      }));
+      process.exit(1);
+    }
+  });
+} else {
+  // Run as persistent MCP server
+  server.run().catch(console.error);
+} 

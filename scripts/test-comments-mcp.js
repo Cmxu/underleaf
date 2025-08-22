@@ -68,13 +68,13 @@ async function testCommentsServer() {
       console.log('✅ List tools request sent\n');
 
       // Test 2: Write a comment
-      console.log('2️⃣ Testing write_comment...');
+      console.log('2️⃣ Testing add_comment...');
       const writeCommentRequest = {
         jsonrpc: '2.0',
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'write_comment',
+          name: 'add_comment',
           arguments: {
             file_path: 'test.tex',
             content: 'This is a test comment from the MCP server',
@@ -89,16 +89,16 @@ async function testCommentsServer() {
       };
       
       await sendMessage(writeCommentRequest);
-      console.log('✅ Write comment request sent\n');
+      console.log('✅ Add comment request sent\n');
 
       // Test 3: List comments
-      console.log('3️⃣ Testing list_comments...');
+      console.log('3️⃣ Testing show_all_comments...');
       const listCommentsRequest = {
         jsonrpc: '2.0',
         id: 3,
         method: 'tools/call',
         params: {
-          name: 'list_comments',
+          name: 'show_all_comments',
           arguments: {}
         }
       };

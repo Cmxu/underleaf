@@ -23,11 +23,11 @@ Underleaf now includes advanced AI collaboration through comments:
 - **Collaborative Workflow**: Seamless interaction between human reviewers and AI assistance
 
 The AI has access to five comment tools:
-- `list_comments` - Browse all comments with filtering and sorting
-- `read_comment` - Get full details of specific comments
-- `write_comment` - Add new comments to specific lines/sections
-- `update_comment` - Modify existing comment content
-- `delete_comment` - Remove outdated comments
+- `show_all_comments` - Browse all comments with filtering and sorting
+- `view_comment_details` - Get full details of specific comments
+- `add_comment` - Add new comments to specific lines/sections
+- `edit_comment` - Modify existing comment content
+- `remove_comment` - Remove outdated comments
 
 Comments are automatically synchronized between the UI and AI, enabling real-time collaborative document review.
 

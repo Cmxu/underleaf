@@ -161,6 +161,7 @@
 		role="dialog"
 		aria-labelledby="settings-title"
 		aria-modal="true"
+		tabindex="0"
 	>
 		<!-- Modal content -->
 		<div class="bg-dark-800 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">

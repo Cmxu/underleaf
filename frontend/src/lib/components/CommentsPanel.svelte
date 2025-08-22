@@ -16,8 +16,26 @@
 	// Subscribe to comments store
 	$: comments = $commentsStore.comments;
 	$: activeComment = $commentsStore.activeComment;
-	$: isPolling = $commentsStore.isPolling;
+	$: isLoading = $commentsStore.isLoading;
 	$: lastSyncTime = $commentsStore.lastSyncTime;
+
+	// Track previous comment count for change detection
+	let previousCommentCount = 0;
+	let showNewCommentNotification = false;
+
+	// Watch for new comments and show notification
+	$: if (comments.length > previousCommentCount && previousCommentCount > 0) {
+		const newCount = comments.length - previousCommentCount;
+		showNewCommentNotification = true;
+		console.log(`🎉 ${newCount} new comment(s) detected!`);
+		
+		// Auto-hide notification after 5 seconds
+		setTimeout(() => {
+			showNewCommentNotification = false;
+		}, 5000);
+	}
+	
+	$: previousCommentCount = comments.length;
 
 	// Confirm dialog state
 	let showDeleteConfirm = false;
@@ -53,14 +71,33 @@
 	}
 
 	async function handleRefreshComments() {
-		if (!repoName) return;
+		if (!repoName || $commentsStore.isLoading) return;
+		
+		console.log('🔄 Manual comment refresh triggered:', { repoName, userId });
+		
 		try {
-			const newComments = await commentsService.refreshComments(repoName, userId);
-			if (newComments.length > 0) {
-				console.log(`🔄 Refreshed and found ${newComments.length} new comments`);
-			}
+			// Refresh comments from backend using the new API
+			const refreshedComments = await commentsService.refreshComments(repoName, userId);
+			console.log(`🔄 Refreshed ${refreshedComments.length} comments from backend`);
 		} catch (error) {
 			console.error('Failed to refresh comments:', error);
+		}
+	}
+
+	async function handleSyncToBackend() {
+		if (!repoName) return;
+		
+		console.log('📤 Manual sync to backend triggered');
+		
+		try {
+			// Save current frontend comments to backend
+			await commentsService.saveCommentsToBackend(repoName, userId);
+			console.log('✅ Successfully synced frontend comments to backend');
+			
+			// Now refresh to see if there are any updates
+			await handleRefreshComments();
+		} catch (error) {
+			console.error('❌ Failed to sync comments to backend:', error);
 		}
 	}
 
@@ -85,14 +122,28 @@
 			<h3 class="text-sm font-medium text-white">Comments</h3>
 			<div class="flex items-center space-x-2">
 				<button
+					on:click={handleSyncToBackend}
+					class="btn btn-sm btn-warning"
+					title="Sync frontend comments to backend"
+					aria-label="Sync frontend comments to backend"
+				>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
+					</svg>
+				</button>
+				<button
 					on:click={handleRefreshComments}
 					class="btn btn-sm btn-secondary"
-					title="Refresh comments from AI"
-					aria-label="Refresh comments"
+					title="Check for new AI comments"
+					aria-label="Check for new AI comments"
+					disabled={$commentsStore.isLoading}
 				>
 					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 					</svg>
+					{#if $commentsStore.isLoading}
+						<span class="ml-2 text-xs">Loading...</span>
+					{/if}
 				</button>
 				<button
 					on:click={handleCreateComment}
@@ -110,18 +161,38 @@
 		<!-- Sync status indicator -->
 		<div class="flex items-center text-xs text-gray-400">
 			<div class="flex items-center space-x-1">
-				{#if isPolling}
-					<div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-					<span>Live sync active</span>
-				{:else}
-					<div class="w-2 h-2 bg-gray-500 rounded-full"></div>
-					<span>Sync paused</span>
-				{/if}
+				<div class="w-2 h-2 bg-blue-500 rounded-full"></div>
+				<span>Backend-driven</span>
 			</div>
 			<span class="mx-2">•</span>
 			<span>Last sync: {formatSyncTime(lastSyncTime)}</span>
+			{#if $commentsStore.isLoading}
+				<span class="mx-2">•</span>
+				<span class="text-yellow-400">🔄 Loading...</span>
+			{/if}
 		</div>
 	</div>
+
+	<!-- New Comment Notification -->
+	{#if showNewCommentNotification}
+		<div class="p-3 bg-green-900/50 border border-green-600 rounded-lg mx-4 mb-3">
+			<div class="flex items-center space-x-2">
+				<svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+				</svg>
+				<span class="text-sm text-green-300">New AI comment(s) detected!</span>
+				<button
+					on:click={() => showNewCommentNotification = false}
+					class="ml-auto text-green-400 hover:text-green-300"
+					aria-label="Dismiss notification"
+				>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				</button>
+			</div>
+		</div>
+	{/if}
 
 	<!-- Comments List -->
 	<div class="flex-1 overflow-y-auto">

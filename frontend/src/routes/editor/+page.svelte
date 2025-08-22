@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { browser } from '$app/environment';
 	import FileTree from '$components/FileTree.svelte';
 	import PdfPreview from '$components/PdfPreview.svelte';
 	import AiChatPanel from '$components/AiChatPanel.svelte';
@@ -10,7 +11,7 @@
 	import CommentModal from '$components/CommentModal.svelte';
 	import { apiClient } from '$lib/utils/api';
 	import { authStore } from '$lib/stores/auth';
-	import { commentsService, commentsStore, setupAutoSave, type Comment } from '$lib/stores/comments';
+	import { commentsService, commentsStore, type Comment } from '$lib/stores/comments';
 	import type { GitStatusResponse } from '$lib/types/api';
 	
 	// Enhanced diff calculation for Monaco editor integration
@@ -564,9 +565,11 @@
 		}, 50);
 	}
 
-	// Reactive statement to handle right sidebar toggle and resize
-	$: if (monacoEditor && (showRightSidebar !== undefined || rightSidebarWidth)) {
-		// Use a small delay to ensure DOM has updated after sidebar toggle/resize
+	// Comprehensive reactive statement to handle all layout changes affecting Monaco editor
+	$: if (monacoEditor) {
+		// React to any layout changes that affect editor size
+		showRightSidebar, rightSidebarWidth, showPdf, editorShouldExpand, panelWidths;
+		// Use a small delay to ensure DOM has updated
 		setTimeout(() => {
 			if (monacoEditor && editorContainer) {
 				const rect = editorContainer.getBoundingClientRect();
@@ -610,8 +613,8 @@
 	// Get repo name from URL params or localStorage
 	onMount(async () => {
 		// Try to get repository name from URL params or localStorage
-		const searchParams = new URLSearchParams(window.location.search);
-		currentRepoName = searchParams.get('repo') || localStorage.getItem('currentRepo');
+		const searchParams = browser ? new URLSearchParams(window.location.search) : new URLSearchParams();
+		currentRepoName = searchParams.get('repo') || (browser ? localStorage.getItem('currentRepo') : null);
 
 		if (!currentRepoName) {
 			// Redirect to home if no repository is specified
@@ -651,27 +654,19 @@
 		// Check for existing PDFs in the build folder
 		await checkForExistingPdfs();
 
-		// Load comments for this repository
+		// Load comments for this repository from backend
 		if (currentRepoName) {
-			// Try to load from backend first (for AI sync), then fallback to localStorage
-			try {
-				await commentsService.loadCommentsFromBackend(currentRepoName, getCurrentUserId());
-			} catch (error) {
-				console.warn('Failed to load comments from backend, loading from localStorage:', error);
-				commentsService.loadComments(currentRepoName);
-			}
-			
-			// Clean up any invalid comments that might exist
-			commentsService.cleanupInvalidComments();
-			
-			setupAutoSave(currentRepoName);
-			
-			// Start real-time polling for AI-generated comments
-			commentsService.startPolling(currentRepoName, getCurrentUserId());
+			// Initialize backend-driven comment system
+			await commentsService.initializeSync(currentRepoName, getCurrentUserId());
 		}
 
 		// Load git status on mount
 		await handleRefreshGitStatus();
+
+		// Add beforeunload listener to handle pending comment position updates
+		if (browser) {
+			window.addEventListener('beforeunload', handleBeforeUnload);
+		}
 	});
 
 	// Clean up subscriptions when component is destroyed
@@ -679,8 +674,13 @@
 		if (commentHighlightingUnsubscribe) {
 			commentHighlightingUnsubscribe();
 		}
-		// Stop comment polling when component is destroyed
-		commentsService.stopPolling();
+		// Clean up comment sync when component is destroyed
+		commentsService.cleanupSync();
+		
+		// Remove beforeunload event listener
+		if (browser) {
+			window.removeEventListener('beforeunload', handleBeforeUnload);
+		}
 	});
 
 	async function initializeMonaco() {
@@ -731,9 +731,15 @@
 				insertSpaces: true
 			});
 
-			// Auto-save on content change
-			monacoEditor.onDidChangeModelContent(() => {
+			// Auto-save on content change and update comment positions
+			monacoEditor.onDidChangeModelContent((event) => {
 				unsavedChanges = true;
+
+				// Calculate text changes for comment position updates
+				const changes = calculateTextChanges(event);
+				if (changes.length > 0) {
+					scheduleCommentPositionUpdate(changes);
+				}
 
 				if (autoSaveTimeout) {
 					clearTimeout(autoSaveTimeout);
@@ -1309,6 +1315,33 @@ Your content here...
 							const toolCallData = JSON.parse(toolCallMatch[1]);
 							console.log('📋 Parsed tool call data:', toolCallData);
 							
+							// Check if this is a comment-related tool call and refresh comments if needed
+							if (toolCallData.name && (
+								toolCallData.name.includes('comment') ||
+								toolCallData.name.includes('add_comment') ||
+								toolCallData.name.includes('write_comment') ||
+								toolCallData.name.includes('edit_comment') ||
+								toolCallData.name.includes('remove_comment') ||
+								toolCallData.name.includes('mcp__underleaf_comments__add_comment') ||
+								toolCallData.name.includes('mcp__underleaf_comments__write_comment') ||
+								toolCallData.name.includes('mcp__underleaf_comments__edit_comment') ||
+								toolCallData.name.includes('mcp__underleaf_comments__remove_comment')
+							)) {
+								console.log('💬 Comment tool detected, refreshing comments tab...');
+								// Trigger comment refresh after a short delay to allow backend processing
+								setTimeout(async () => {
+									try {
+										if (currentRepoName) {
+											const userId = getCurrentUserId();
+											await commentsService.triggerRefresh(currentRepoName, userId);
+											console.log('✅ Comments refreshed after AI comment');
+										}
+									} catch (error) {
+										console.warn('Failed to refresh comments after AI comment:', error);
+									}
+								}, 1000); // Wait 1 second for backend to process the comment
+							}
+							
 							// Process edit diff if this is an Edit tool call
 							const editDiff = processEditToolCall(toolCallData);
 							
@@ -1537,6 +1570,90 @@ Your content here...
 	if (typeof window !== 'undefined') {
 		(window as any).testInEditorDiff = testInEditorDiff;
 		(window as any).testToolCallDetection = testToolCallDetection;
+	}
+
+	// Position calculation utilities for comment updates
+	function calculateTextChanges(event: any) {
+		if (!event || !event.changes || !Array.isArray(event.changes)) {
+			return [];
+		}
+
+		return event.changes.map((change: any) => ({
+			start_line: change.range.startLineNumber,
+			start_column: change.range.startColumn,
+			end_line: change.range.endLineNumber,
+			end_column: change.range.endColumn,
+			lines_added: calculateLinesAdded(change.text, change.rangeLength),
+			lines_content: change.text ? change.text.split('\n') : []
+		}));
+	}
+
+	function calculateLinesAdded(newText: string, rangeLength: number): number {
+		if (!newText) return 0;
+		
+		const newLines = newText.split('\n').length - 1;
+		// Calculate how many lines were removed based on range length
+		// This is an approximation - for exact calculation we'd need the original text
+		const approximateOldLines = Math.max(0, Math.floor(rangeLength / 50)); // Rough estimate
+		
+		return newLines - approximateOldLines;
+	}
+
+	// Debounced comment position update to avoid excessive API calls
+	let positionUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
+	let pendingChanges: Array<any> = [];
+
+	function scheduleCommentPositionUpdate(changes: Array<any>) {
+		if (!currentRepoName || !currentFilePath) return;
+
+		// Add changes to pending list
+		pendingChanges.push(...changes);
+
+		// Clear existing timeout
+		if (positionUpdateTimeout) {
+			clearTimeout(positionUpdateTimeout);
+		}
+
+		// Schedule update after a delay to batch multiple rapid changes
+		positionUpdateTimeout = setTimeout(async () => {
+			await flushPendingPositionUpdates();
+		}, 1000); // Wait 1 second after last change
+	}
+
+	// Flush pending position updates immediately
+	async function flushPendingPositionUpdates() {
+		if (pendingChanges.length === 0 || !currentRepoName || !currentFilePath) return;
+
+		try {
+			console.log('📍 Updating comment positions for', pendingChanges.length, 'changes');
+			await commentsService.updateCommentPositions(
+				currentRepoName,
+				currentFilePath,
+				pendingChanges
+			);
+			pendingChanges = [];
+			console.log('✅ Successfully flushed pending position updates');
+		} catch (error) {
+			console.error('❌ Failed to update comment positions:', error);
+			// Don't clear pending changes on error - we can retry later
+		}
+	}
+
+	// Handle page unload to ensure pending updates are saved
+	function handleBeforeUnload() {
+		// Flush any pending position updates immediately before page unload
+		if (pendingChanges.length > 0) {
+			// Use navigator.sendBeacon for reliable sync during page unload
+			if (navigator.sendBeacon && currentRepoName && currentFilePath) {
+				const payload = JSON.stringify({
+					file_path: currentFilePath,
+					changes: pendingChanges
+				});
+				const url = `/api/comments/${getCurrentUserId()}/${currentRepoName}/update-positions`;
+				navigator.sendBeacon(url, payload);
+				console.log('📡 Sent pending position updates via beacon');
+			}
+		}
 	}
 
 	// Handle applying edit diffs to the editor
@@ -1800,8 +1917,14 @@ Your content here...
 					});
 
 					// Re-add event listeners
-					monacoEditor.onDidChangeModelContent(() => {
+					monacoEditor.onDidChangeModelContent((event) => {
 						unsavedChanges = true;
+
+						// Calculate text changes for comment position updates
+						const changes = calculateTextChanges(event);
+						if (changes.length > 0) {
+							scheduleCommentPositionUpdate(changes);
+						}
 
 						if (autoSaveTimeout) {
 							clearTimeout(autoSaveTimeout);
@@ -1932,10 +2055,16 @@ Your content here...
 		}, 100);
 	}
 
-	function handleDeleteComment(event: CustomEvent<string>) {
+	async function handleDeleteComment(event: CustomEvent<string>) {
 		const commentId = event.detail;
-		commentsService.deleteComment(commentId);
-		// Note: Comment highlighting will be automatically updated through the store subscription
+		if (!currentRepoName) return;
+		
+		try {
+			await commentsService.deleteComment(currentRepoName, commentId, getCurrentUserId());
+			// Note: Comment highlighting will be automatically updated through the store subscription
+		} catch (error) {
+			console.error('Failed to delete comment:', error);
+		}
 	}
 
 	function handleCreateComment() {
@@ -1958,20 +2087,25 @@ Your content here...
 		showCommentModal = true;
 	}
 
-	function handleCommentModalSave(event: CustomEvent<{ content: string; editingComment: Comment | null }>) {
+	async function handleCommentModalSave(event: CustomEvent<{ content: string; editingComment: Comment | null }>) {
 		const { content } = event.detail;
 		
-		if (commentModalSelection && currentFilePath) {
-			commentsService.addComment({
-				fileName: currentFilePath,
-				startLine: commentModalSelection.startLineNumber,
-				startColumn: commentModalSelection.startColumn,
-				endLine: commentModalSelection.endLineNumber,
-				endColumn: commentModalSelection.endColumn,
-				selectedText: commentModalSelectedText,
-				content: content,
-				author: $authStore.user?.email || 'Anonymous'
-			});
+		if (commentModalSelection && currentFilePath && currentRepoName) {
+			try {
+				await commentsService.addComment(currentRepoName, {
+					fileName: currentFilePath,
+					startLine: commentModalSelection.startLineNumber,
+					startColumn: commentModalSelection.startColumn,
+					endLine: commentModalSelection.endLineNumber,
+					endColumn: commentModalSelection.endColumn,
+					selectedText: commentModalSelectedText,
+					content: content,
+					author: $authStore.user?.email || 'Anonymous'
+				}, getCurrentUserId());
+			} catch (error) {
+				console.error('Failed to add comment:', error);
+				// Could show user feedback here
+			}
 		}
 		
 		// Close modal and reset state
@@ -2202,7 +2336,7 @@ Your content here...
 			}
 		} else if (resizingPanel === 'right-sidebar') {
 			// Calculate new width for right sidebar
-			const windowWidth = window.innerWidth;
+			const windowWidth = browser ? window.innerWidth : 1200; // Fallback for SSR
 			const relativeX = windowWidth - newX; // Distance from right edge
 			const newWidth = Math.min(Math.max(relativeX, 300), 800); // 300px to 800px range (increased for larger default)
 			rightSidebarWidth = newWidth;
@@ -2500,7 +2634,6 @@ Your content here...
 
 				<!-- Git Panel Resize Handle -->
 				<button
-					role="separator"
 					aria-label="Resize git panel"
 					class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors border-0 p-0"
 					on:mousedown={(e) => startResize('git-split', e)}
@@ -2713,7 +2846,6 @@ Your content here...
 
 				<!-- Sidebar Resize Handle -->
 				<button
-					role="separator"
 					aria-label="Resize file tree panel"
 					class="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 bg-transparent transition-colors border-0 p-0"
 					on:mousedown={(e) => startResize('filetree', e)}
@@ -2731,8 +2863,8 @@ Your content here...
 				<!-- Editor -->
 				{#if showEditor}
 					<div
-						class="flex flex-col min-h-0 relative {editorShouldExpand ? 'flex-1' : ''}"
-						style="{editorShouldExpand ? '' : `width: ${panelWidths.editor}%; transform: translateZ(0); will-change: width;`}"
+						class="flex flex-col min-h-0 relative"
+						style="width: {panelWidths.editor}%; transform: translateZ(0); will-change: width;"
 					>
 						{#if currentFilePath}
 							<div
@@ -2777,7 +2909,6 @@ Your content here...
 				<!-- Resize Handle between Editor and PDF -->
 				{#if showEditor && showPdf}
 					<button
-						role="separator"
 						aria-label="Resize editor and PDF panels"
 						class="w-1 bg-gray-600 cursor-col-resize flex-shrink-0 panel-resize-handle"
 						on:mousedown={(e) => startResize('editor-pdf', e)}
@@ -2821,7 +2952,6 @@ Your content here...
 			>
 				<!-- Resize Handle for width -->
 				<button
-					role="separator"
 					aria-label="Resize right sidebar"
 					class="absolute top-0 left-0 w-1 h-full cursor-col-resize hover:bg-blue-500 bg-transparent transition-colors border-0 p-0"
 					on:mousedown={(e) => startResize('right-sidebar', e)}
@@ -2846,7 +2976,6 @@ Your content here...
 
 				<!-- Resize Handle for split -->
 				<button
-					role="separator"
 					aria-label="Resize sidebar split"
 					class="h-1 w-full cursor-row-resize hover:bg-blue-500 bg-gray-600 transition-colors border-0 p-0"
 					on:mousedown={(e) => startResize('right-sidebar-split', e)}
