@@ -582,15 +582,28 @@
 
 	// Get current user ID
 	function getCurrentUserId(): string {
-		return $authStore.user?.id || 'anonymous';
+		if (!$authStore.user || $authStore.loading) {
+			throw new Error('User not authenticated or authentication still loading');
+		}
+		return $authStore.user.id;
+	}
+
+	// Safe user ID for template usage - returns empty string if not ready
+	$: safeUserId = $authStore.user && !$authStore.loading ? $authStore.user.id : '';
+	
+	// Safe user ID for API calls - returns null if not ready
+	function getSafeUserId(): string | null {
+		return $authStore.user && !$authStore.loading ? $authStore.user.id : null;
 	}
 
 	// Load project settings
 	async function loadProjectSettings() {
 		if (!currentRepoName) return;
 
+		const userId = getSafeUserId();
+		if (!userId) return; // Skip if auth not ready
+
 		try {
-			const userId = getCurrentUserId();
 			const settings = await apiClient.getProjectSettings(currentRepoName, userId);
 			projectSettings = settings;
 		} catch (error) {
@@ -612,6 +625,25 @@
 
 	// Get repo name from URL params or localStorage
 	onMount(async () => {
+		// Wait for authentication to be ready
+		if ($authStore.loading) {
+			await new Promise<void>((resolve) => {
+				const unsubscribe = authStore.subscribe((state) => {
+					if (!state.loading) {
+						unsubscribe();
+						resolve();
+					}
+				});
+			});
+		}
+
+		// Check if user is authenticated
+		if (!$authStore.user) {
+			compileError = 'Authentication required. Please sign in to access the editor.';
+			setTimeout(() => goto('/'), 2000);
+			return;
+		}
+
 		// Try to get repository name from URL params or localStorage
 		const searchParams = browser ? new URLSearchParams(window.location.search) : new URLSearchParams();
 		currentRepoName = searchParams.get('repo') || (browser ? localStorage.getItem('currentRepo') : null);
@@ -918,6 +950,31 @@ Your content here...
 				// Save current file state if switching files
 				if (previousFilePath && previousFilePath !== filePath) {
 					console.log('💾 Saving state for file:', previousFilePath);
+					
+					// Cancel any pending auto-save timeout since we're doing an immediate save
+					if (autoSaveTimeout) {
+						clearTimeout(autoSaveTimeout);
+						autoSaveTimeout = null;
+					}
+					
+					// Save any unsaved changes in the current file first
+					if (unsavedChanges) {
+						console.log('💾 Auto-saving unsaved changes before switching files');
+						try {
+							const content = monacoEditor.getValue();
+							const userId = getCurrentUserId();
+							await apiClient.saveFile(currentRepoName, previousFilePath, content, userId);
+							
+							// Sync comment positions after save
+							await syncCommentPositionsWithEditor();
+							
+							console.log('✅ Successfully saved file before switching:', previousFilePath);
+						} catch (error) {
+							console.error('❌ Failed to save file before switching:', error);
+							// Continue with file switch even if save fails
+						}
+					}
+					
 					savePendingEditsForFile(previousFilePath);
 					clearCurrentFileDecorations();
 				}
@@ -1039,6 +1096,142 @@ Your content here...
 		clearCurrentFileDecorations();
 	}
 
+	// Sync all current comment positions with the backend based on their current editor positions
+	async function syncCommentPositionsWithEditor() {
+		if (!currentRepoName || !currentFilePath || !monacoEditor) {
+			console.log('📍 Skipping sync - missing:', { currentRepoName, currentFilePath, monacoEditor: !!monacoEditor });
+			return;
+		}
+
+		const userId = getCurrentUserId();
+		if (!userId) {
+			console.log('📍 Skipping sync - no user ID');
+			return;
+		}
+
+		try {
+			// Get current comments for this file from the store
+			let fileComments: Comment[] = [];
+			commentsStore.subscribe(state => {
+				fileComments = state.comments.filter(comment => comment.fileName === currentFilePath);
+			})();
+			
+			console.log('📍 Found', fileComments.length, 'comments for file:', currentFilePath);
+			console.log('📍 Available comment decoration IDs:', commentDecorationIds.length);
+			
+			if (fileComments.length === 0) {
+				console.log('📍 No comments to sync for file:', currentFilePath);
+				return;
+			}
+
+			// Get current content and create updated comment positions
+			const currentContent = monacoEditor.getValue();
+			
+			// Debug: log all current decoration ranges
+			const model = monacoEditor.getModel();
+			if (model) {
+				console.log('📍 All decoration ranges:');
+				commentDecorationIds.forEach((decorationId, index) => {
+					const range = model.getDecorationRange(decorationId);
+					console.log(`  ${index}: ${decorationId} -> ${range ? `${range.startLineNumber}:${range.startColumn}-${range.endLineNumber}:${range.endColumn}` : 'null'}`);
+				});
+			}
+			
+			// For each comment, find its actual current position in the editor
+			const updatedComments = fileComments.map(comment => {
+				console.log('📍 Processing comment:', comment.id, `${comment.startLine}:${comment.startColumn}-${comment.endLine}:${comment.endColumn}`);
+				
+				// Use the mapping to find the correct decoration for this comment
+				const decorationId = commentToDecorationMap.get(comment.id);
+				
+				if (decorationId) {
+					const decorationRange = monacoEditor.getModel()?.getDecorationRange(decorationId);
+					
+					if (decorationRange) {
+						console.log('📍 Found mapped decoration for comment:', comment.id, 
+							`${decorationRange.startLineNumber}:${decorationRange.startColumn}-${decorationRange.endLineNumber}:${decorationRange.endColumn}`);
+						
+						const newSelectedText = currentContent.substring(
+							monacoEditor.getModel()?.getOffsetAt({
+								lineNumber: decorationRange.startLineNumber,
+								column: decorationRange.startColumn
+							}) || 0,
+							monacoEditor.getModel()?.getOffsetAt({
+								lineNumber: decorationRange.endLineNumber,
+								column: decorationRange.endColumn
+							}) || 0
+						);
+						
+						const updatedComment = {
+							id: comment.id,
+							startLine: decorationRange.startLineNumber,
+							startColumn: decorationRange.startColumn,
+							endLine: decorationRange.endLineNumber,
+							endColumn: decorationRange.endColumn,
+							selectedText: newSelectedText
+						};
+						
+						console.log('📍 Updated comment position from decoration:', updatedComment);
+						return updatedComment;
+					} else {
+						console.log('📍 Decoration exists but no range found for comment:', comment.id);
+					}
+				} else {
+					console.log('📍 No decoration mapping found for comment:', comment.id);
+				}
+
+				// Fallback: use stored positions if decoration not found
+				console.log('📍 Using stored positions for comment:', comment.id);
+				return {
+					id: comment.id,
+					startLine: comment.startLine,
+					startColumn: comment.startColumn,
+					endLine: comment.endLine,
+					endColumn: comment.endColumn,
+					selectedText: comment.selectedText
+				};
+			});
+
+			// Update comments in the store with new positions
+			let syncCount = 0;
+			for (const updatedComment of updatedComments) {
+				const originalComment = fileComments.find(c => c.id === updatedComment.id);
+				if (originalComment && 
+					(originalComment.startLine !== updatedComment.startLine ||
+					 originalComment.startColumn !== updatedComment.startColumn ||
+					 originalComment.endLine !== updatedComment.endLine ||
+					 originalComment.endColumn !== updatedComment.endColumn ||
+					 originalComment.selectedText !== updatedComment.selectedText)) {
+					
+					console.log('📍 Syncing changed comment:', updatedComment.id, 
+						`${originalComment.startLine}:${originalComment.startColumn}-${originalComment.endLine}:${originalComment.endColumn}`,
+						'->',
+						`${updatedComment.startLine}:${updatedComment.startColumn}-${updatedComment.endLine}:${updatedComment.endColumn}`);
+					
+					await commentsService.updateComment(currentRepoName, updatedComment.id, {
+						startLine: updatedComment.startLine,
+						startColumn: updatedComment.startColumn,
+						endLine: updatedComment.endLine,
+						endColumn: updatedComment.endColumn,
+						selectedText: updatedComment.selectedText
+					}, userId);
+					syncCount++;
+				} else {
+					console.log('📍 Comment unchanged:', updatedComment.id);
+				}
+			}
+
+			console.log('📍 Successfully synced', syncCount, 'out of', updatedComments.length, 'comment positions with editor state');
+			
+			// Also log that the sync function was called
+			if (fileComments.length > 0) {
+				console.log('🔄 Comment position sync completed for', fileComments.length, 'comments in file:', currentFilePath);
+			}
+		} catch (error) {
+			console.error('❌ Failed to sync comment positions with editor:', error);
+		}
+	}
+
 	async function handleSaveFile() {
 		if (!currentRepoName || !currentFilePath || !monacoEditor) return;
 
@@ -1046,6 +1239,10 @@ Your content here...
 			const content = monacoEditor.getValue();
 			const userId = getCurrentUserId();
 			await apiClient.saveFile(currentRepoName, currentFilePath, content, userId);
+			
+			// After successful save, sync comment positions with current editor state
+			await syncCommentPositionsWithEditor();
+			
 			unsavedChanges = false;
 
 			if (autoSaveTimeout) {
@@ -1578,25 +1775,38 @@ Your content here...
 			return [];
 		}
 
-		return event.changes.map((change: any) => ({
-			start_line: change.range.startLineNumber,
-			start_column: change.range.startColumn,
-			end_line: change.range.endLineNumber,
-			end_column: change.range.endColumn,
-			lines_added: calculateLinesAdded(change.text, change.rangeLength),
-			lines_content: change.text ? change.text.split('\n') : []
-		}));
+		const changes = event.changes.map((change: any) => {
+			const result = {
+				start_line: change.range.startLineNumber,
+				start_column: change.range.startColumn,
+				end_line: change.range.endLineNumber,
+				end_column: change.range.endColumn,
+				lines_added: calculateLinesAdded(change.text, change.rangeLength, change.range),
+				lines_content: change.text ? change.text.split('\n') : []
+			};
+			
+			console.log('📝 Text change detected:', {
+				range: `${result.start_line}:${result.start_column} - ${result.end_line}:${result.end_column}`,
+				lines_added: result.lines_added,
+				new_text: change.text ? `"${change.text.substring(0, 50)}${change.text.length > 50 ? '...' : ''}"` : '""',
+				rangeLength: change.rangeLength
+			});
+			
+			return result;
+		});
+		
+		return changes;
 	}
 
-	function calculateLinesAdded(newText: string, rangeLength: number): number {
-		if (!newText) return 0;
+	function calculateLinesAdded(newText: string, rangeLength: number, range: any): number {
+		// Calculate new lines in the inserted text
+		const newLines = newText ? newText.split('\n').length - 1 : 0;
 		
-		const newLines = newText.split('\n').length - 1;
-		// Calculate how many lines were removed based on range length
-		// This is an approximation - for exact calculation we'd need the original text
-		const approximateOldLines = Math.max(0, Math.floor(rangeLength / 50)); // Rough estimate
+		// Calculate old lines that were removed based on the range
+		const oldLines = range.endLineNumber - range.startLineNumber;
 		
-		return newLines - approximateOldLines;
+		// Return the net change in line count
+		return newLines - oldLines;
 	}
 
 	// Debounced comment position update to avoid excessive API calls
@@ -1624,15 +1834,29 @@ Your content here...
 	async function flushPendingPositionUpdates() {
 		if (pendingChanges.length === 0 || !currentRepoName || !currentFilePath) return;
 
+		const userId = getSafeUserId();
+		if (!userId) return; // Skip if auth not ready
+
 		try {
 			console.log('📍 Updating comment positions for', pendingChanges.length, 'changes');
+			console.log('📍 Pending changes:', JSON.stringify(pendingChanges, null, 2));
+			
 			await commentsService.updateCommentPositions(
 				currentRepoName,
 				currentFilePath,
-				pendingChanges
+				pendingChanges,
+				userId
 			);
 			pendingChanges = [];
 			console.log('✅ Successfully flushed pending position updates');
+			
+			// Force a comment refresh to show updated positions in the UI
+			setTimeout(() => {
+				if (currentRepoName && userId) {
+					commentsService.refreshComments(currentRepoName, userId);
+				}
+			}, 500); // Small delay to let backend finish processing
+			
 		} catch (error) {
 			console.error('❌ Failed to update comment positions:', error);
 			// Don't clear pending changes on error - we can retry later
@@ -1640,7 +1864,14 @@ Your content here...
 	}
 
 	// Handle page unload to ensure pending updates are saved
-	function handleBeforeUnload() {
+	function handleBeforeUnload(event: BeforeUnloadEvent) {
+		// Show warning for unsaved changes
+		if (unsavedChanges) {
+			const message = 'You have unsaved changes. Are you sure you want to leave?';
+			event.returnValue = message; // Standard way
+			return message; // For some browsers
+		}
+		
 		// Flush any pending position updates immediately before page unload
 		if (pendingChanges.length > 0) {
 			// Use navigator.sendBeacon for reliable sync during page unload
@@ -1649,7 +1880,9 @@ Your content here...
 					file_path: currentFilePath,
 					changes: pendingChanges
 				});
-				const url = `/api/comments/${getCurrentUserId()}/${currentRepoName}/update-positions`;
+				const userId = getSafeUserId();
+				if (!userId) return; // Skip if auth not ready
+				const url = `/api/comments/${userId}/${currentRepoName}/update-positions`;
 				navigator.sendBeacon(url, payload);
 				console.log('📡 Sent pending position updates via beacon');
 			}
@@ -2122,6 +2355,7 @@ Your content here...
 
 	// Setup comment highlighting in Monaco editor
 	let commentDecorationIds: string[] = [];
+	let commentToDecorationMap: Map<string, string> = new Map(); // comment ID -> decoration ID
 	let commentHighlightingUnsubscribe: (() => void) | null = null;
 	
 	function setupCommentHighlighting() {
@@ -2163,7 +2397,18 @@ Your content here...
 			}));
 
 			// Apply decorations, properly replacing previous ones
-			commentDecorationIds = monacoEditor.deltaDecorations(commentDecorationIds, decorations);
+			const newDecorationIds = monacoEditor.deltaDecorations(commentDecorationIds, decorations);
+			commentDecorationIds = newDecorationIds;
+			
+			// Update the mapping between comment IDs and decoration IDs
+			commentToDecorationMap.clear();
+			fileComments.forEach((comment, index) => {
+				if (newDecorationIds[index]) {
+					commentToDecorationMap.set(comment.id, newDecorationIds[index]);
+				}
+			});
+			
+			console.log('📍 Updated comment decoration mapping:', Object.fromEntries(commentToDecorationMap));
 		});
 	}
 
@@ -2627,7 +2872,7 @@ Your content here...
 					<FileTree
 						bind:this={fileTreeComponent}
 						repoName={currentRepoName}
-						userId={getCurrentUserId()}
+						userId={safeUserId}
 						onFileSelect={handleFileSelect}
 					/>
 				</div>
@@ -2967,7 +3212,7 @@ Your content here...
 				<div class="overflow-hidden" style="height: {rightSidebarSplitHeight}%;">
 					<CommentsPanel
 						repoName={currentRepoName || ''}
-						userId={getCurrentUserId()}
+						userId={safeUserId}
 						on:navigateToComment={handleNavigateToComment}
 						on:deleteComment={handleDeleteComment}
 						on:createComment={handleCreateComment}
@@ -3021,7 +3266,7 @@ Your content here...
 <ProjectSettingsModal
 	bind:isOpen={showProjectSettingsModal}
 	repoName={currentRepoName || ''}
-	userId={getCurrentUserId()}
+	userId={safeUserId}
 	on:close={handleCloseProjectSettings}
 	on:save={handleSaveProjectSettings}
 />

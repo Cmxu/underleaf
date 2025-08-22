@@ -21,9 +21,13 @@
 	async function doSubmit(credentials?: { username: string; password: string }) {
 		if (!repoUrl.trim()) return;
 
-		// Check if user is authenticated
-		if (!$authStore.user) {
-			showAuthModal = true;
+		// Check if user is authenticated and auth is ready
+		if (!$authStore.user || $authStore.loading) {
+			if ($authStore.loading) {
+				error = 'Authentication is still loading. Please wait a moment and try again.';
+			} else {
+				showAuthModal = true;
+			}
 			return;
 		}
 

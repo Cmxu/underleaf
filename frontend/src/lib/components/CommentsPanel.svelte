@@ -6,6 +6,7 @@
 
 	export let repoName: string = '';
 	export let userId: string = 'anonymous';
+	export let showDebug: boolean = false;
 
 	const dispatch = createEventDispatcher<{
 		navigateToComment: Comment;
@@ -119,7 +120,16 @@
 	<!-- Header -->
 	<div class="p-4 border-b border-gray-700">
 		<div class="flex items-center justify-between mb-2">
-			<h3 class="text-sm font-medium text-white">Comments</h3>
+			<div class="flex items-center space-x-2">
+				<h3 class="text-sm font-medium text-white">Comments</h3>
+				<button
+					on:click={() => showDebug = !showDebug}
+					class="text-xs px-2 py-1 rounded transition-colors {showDebug ? 'bg-yellow-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}"
+					title="Toggle debug info"
+				>
+					DEBUG
+				</button>
+			</div>
 			<div class="flex items-center space-x-2">
 				<button
 					on:click={handleSyncToBackend}
@@ -263,6 +273,29 @@
 					<div class="text-sm text-gray-200">
 						{comment.content}
 					</div>
+
+					<!-- Debug Information -->
+					{#if showDebug}
+						<div class="mt-3 p-2 bg-yellow-900/20 border border-yellow-600/30 rounded text-xs">
+							<div class="font-mono text-yellow-300 mb-1">DEBUG INFO:</div>
+							<div class="grid grid-cols-2 gap-x-4 gap-y-1 text-yellow-200">
+								<div><span class="text-yellow-400">ID:</span> {comment.id}</div>
+								<div><span class="text-yellow-400">File:</span> {comment.fileName}</div>
+								<div><span class="text-yellow-400">Start:</span> {comment.startLine}:{comment.startColumn}</div>
+								<div><span class="text-yellow-400">End:</span> {comment.endLine}:{comment.endColumn}</div>
+								<div><span class="text-yellow-400">Created:</span> {new Date(comment.createdAt).toISOString()}</div>
+								<div><span class="text-yellow-400">Updated:</span> {new Date(comment.updatedAt).toISOString()}</div>
+							</div>
+							{#if comment.selectedText}
+								<div class="mt-2">
+									<div class="text-yellow-400">Selected Text:</div>
+									<div class="font-mono bg-yellow-900/10 p-1 rounded text-yellow-100 break-words">
+										"{comment.selectedText}"
+									</div>
+								</div>
+							{/if}
+						</div>
+					{/if}
 				</div>
 			{/each}
 		{/if}

@@ -50,7 +50,10 @@ class ApiClient {
 		return response.json();
 	}
 
-	async cloneRepo(repoUrl: string, userId = 'anonymous', credentials?: { username: string; password: string }): Promise<CloneRepoResponse> {
+	async cloneRepo(repoUrl: string, userId: string, credentials?: { username: string; password: string }): Promise<CloneRepoResponse> {
+		if (!userId || userId === 'anonymous') {
+			throw new Error('Valid user ID required. Please sign in to clone repositories.');
+		}
 		return this.request<CloneRepoResponse>('/api/clone', {
 			method: 'POST',
 			body: JSON.stringify({ repoUrl, userId, credentials })
@@ -59,20 +62,29 @@ class ApiClient {
 
 	async compileRepo(
 		repoName: string,
-		userId = 'anonymous',
+		userId: string,
 		texFile = 'main.tex'
 	): Promise<CompileRepoResponse> {
+		if (!userId || userId === 'anonymous') {
+			throw new Error('Valid user ID required. Please sign in to compile repositories.');
+		}
 		return this.request<CompileRepoResponse>('/api/compile', {
 			method: 'POST',
 			body: JSON.stringify({ repoName, userId, texFile })
 		});
 	}
 
-	async getFileTree(repoName: string, userId = 'anonymous'): Promise<FileTreeResponse> {
+	async getFileTree(repoName: string, userId: string): Promise<FileTreeResponse> {
+		if (!userId || userId === 'anonymous') {
+			throw new Error('Valid user ID required. Please sign in to access files.');
+		}
 		return this.request<FileTreeResponse>(`/api/files/${userId}/${repoName}`);
 	}
 
-	async checkRepoExists(repoName: string, userId = 'anonymous'): Promise<boolean> {
+	async checkRepoExists(repoName: string, userId: string): Promise<boolean> {
+		if (!userId || userId === 'anonymous') {
+			throw new Error('Valid user ID required. Please sign in to check repository existence.');
+		}
 		try {
 			await this.getFileTree(repoName, userId);
 			return true;
@@ -84,8 +96,11 @@ class ApiClient {
 	async getFileContent(
 		repoName: string,
 		filePath: string,
-		userId = 'anonymous'
+		userId: string
 	): Promise<FileContentResponse> {
+		if (!userId || userId === 'anonymous') {
+			throw new Error('Valid user ID required. Please sign in to access file content.');
+		}
 		const params = new URLSearchParams({ filePath });
 		return this.request<FileContentResponse>(`/api/files/${userId}/${repoName}/content?${params}`);
 	}
@@ -94,15 +109,21 @@ class ApiClient {
 		repoName: string,
 		filePath: string,
 		content: string,
-		userId = 'anonymous'
+		userId: string
 	): Promise<SaveFileResponse> {
+		if (!userId || userId === 'anonymous') {
+			throw new Error('Valid user ID required. Please sign in to save files.');
+		}
 		return this.request<SaveFileResponse>(`/api/files/${userId}/${repoName}/content`, {
 			method: 'PUT',
 			body: JSON.stringify({ filePath, content })
 		});
 	}
 
-	async getGitStatus(repoName: string, userId = 'anonymous'): Promise<GitStatusResponse> {
+	async getGitStatus(repoName: string, userId: string): Promise<GitStatusResponse> {
+		if (!userId || userId === 'anonymous') {
+			throw new Error('Valid user ID required. Please sign in to access Git status.');
+		}
 		return this.request<GitStatusResponse>(`/api/git/${userId}/${repoName}/status`);
 	}
 
