@@ -74,6 +74,20 @@ class ApiClient {
 		});
 	}
 
+	async compileWithComments(
+		repoName: string,
+		userId: string,
+		texFile = 'main.tex'
+	): Promise<CompileRepoResponse & { commentsCount?: number }> {
+		if (!userId || userId === 'anonymous') {
+			throw new Error('Valid user ID required. Please sign in to compile repositories.');
+		}
+		return this.request<CompileRepoResponse & { commentsCount?: number }>('/api/compile-with-comments', {
+			method: 'POST',
+			body: JSON.stringify({ repoName, userId, texFile })
+		});
+	}
+
 	async getFileTree(repoName: string, userId: string): Promise<FileTreeResponse> {
 		if (!userId || userId === 'anonymous') {
 			throw new Error('Valid user ID required. Please sign in to access files.');

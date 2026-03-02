@@ -132,7 +132,7 @@ export const commentsService = {
         commentsStore.update(state => ({
           ...state,
           comments: [...state.comments, deletedComment].sort((a, b) => 
-            new Date(a.createdAt).getTime() - new Date(a.createdAt).getTime()
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
           )
         }));
       }
@@ -168,7 +168,7 @@ export const commentsService = {
         commentsStore.update(state => ({
           ...state,
           comments: state.comments.map(c => 
-            c.id === commentId ? originalComment : c
+            c.id === commentId ? originalComment! : c
           )
         }));
       }

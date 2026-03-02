@@ -1329,6 +1329,70 @@ Your content here...
 		handleCompile(true);
 	}
 
+	async function handleCompileWithComments(compileMain = false) {
+		if (!currentRepoName) return;
+		isCompiling = true;
+		compileError = '';
+		compileSuccess = false;
+
+		try {
+			const userId = getCurrentUserId();
+			
+			// Save preview content for all files with pending edits for compilation
+			if (globalPendingEdits.size > 0) {
+				console.log('🎯 Compiling with comments including pending changes for', globalPendingEdits.size, 'files');
+				
+				// Save preview content for all files with pending edits
+				for (const [filePath, fileEdits] of globalPendingEdits.entries()) {
+					const unappliedEdits = fileEdits.filter(edit => !edit.applied);
+					if (unappliedEdits.length > 0) {
+						const previewContent = previewFileContents.get(filePath);
+						if (previewContent) {
+							console.log('📄 Saving preview content for', filePath, 'with', unappliedEdits.length, 'pending edits');
+							await apiClient.saveFile(currentRepoName, filePath, previewContent, userId);
+						}
+					}
+				}
+				
+				// Also save current file if it has unsaved changes
+				if (currentFilePath && unsavedChanges && !globalPendingEdits.has(currentFilePath)) {
+					await handleSaveFile();
+				}
+			} else if (currentFilePath && unsavedChanges) {
+				// Save current file normally if no pending edits anywhere
+				await handleSaveFile();
+			}
+			
+			// Determine which file to compile
+			let texFileToCompile: string;
+			
+			if (compileMain && projectSettings.mainDocument) {
+				texFileToCompile = projectSettings.mainDocument;
+			} else if (currentFilePath?.endsWith('.tex')) {
+				texFileToCompile = currentFilePath;
+			} else {
+				texFileToCompile = projectSettings.mainDocument || 'main.tex';
+			}
+
+			const result = await apiClient.compileWithComments(currentRepoName, userId, texFileToCompile);
+			compileSuccess = true;
+			if (result.pdfUrl) {
+				pdfUrl = result.pdfUrl;
+				console.log('PDF compiled with comments:', result.pdfUrl);
+				
+				// Show success message with comment count
+				if (result.commentsCount !== undefined) {
+					console.log(`Compilation successful with ${result.commentsCount} comments rendered`);
+				}
+			}
+		} catch (error) {
+			console.error('Compilation with comments failed:', error);
+			compileError = error instanceof Error ? error.message : 'Compilation failed';
+		} finally {
+			isCompiling = false;
+		}
+	}
+
 	function handleGoHome() {
 		if (currentRepoName) {
 			localStorage.removeItem('currentRepo');
@@ -2798,6 +2862,38 @@ Your content here...
 						{/if}
 					</button>
 				</div>
+
+				<!-- Split "Compile with Comments" buttons -->
+				<div class="flex ml-2">
+					<button
+						on:click={() => handleCompileWithComments(false)}
+						disabled={isCompiling || !currentRepoName}
+						class="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 text-sm disabled:opacity-50 rounded-r-none border-r border-amber-700 transition-colors duration-200"
+					>
+						{#if isCompiling}
+							<div class="flex items-center space-x-2">
+								<div class="loading-spinner w-4 h-4"></div>
+								<span>Compiling...</span>
+							</div>
+						{:else}
+							Compile Current + Comments
+						{/if}
+					</button>
+					<button
+						on:click={() => handleCompileWithComments(true)}
+						disabled={isCompiling || !currentRepoName}
+						class="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 text-sm disabled:opacity-50 rounded-l-none transition-colors duration-200"
+					>
+						{#if isCompiling}
+							<div class="flex items-center space-x-2">
+								<div class="loading-spinner w-4 h-4"></div>
+								<span>Compiling...</span>
+							</div>
+						{:else}
+							Compile Main + Comments
+						{/if}
+					</button>
+				</div>
 			{:else}
 				<!-- Single compile button -->
 				<button
@@ -2812,6 +2908,22 @@ Your content here...
 						</div>
 					{:else}
 						Compile PDF
+					{/if}
+				</button>
+
+				<!-- Single "Compile with Comments" button -->
+				<button
+					on:click={() => handleCompileWithComments(false)}
+					disabled={isCompiling || !currentRepoName}
+					class="bg-amber-600 hover:bg-amber-700 text-white px-6 py-2 text-sm disabled:opacity-50 ml-2 transition-colors duration-200"
+				>
+					{#if isCompiling}
+						<div class="flex items-center space-x-2">
+							<div class="loading-spinner w-4 h-4"></div>
+							<span>Compiling...</span>
+						</div>
+					{:else}
+						Compile with Comments
 					{/if}
 				</button>
 			{/if}

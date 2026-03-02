@@ -1168,6 +1168,495 @@ This is a demonstration PDF showing that compilation is working.
   }
 });
 
+// Compile with comments endpoint - renders comments as todonotes in PDF
+app.post('/api/compile-with-comments', async (req, res) => {
+  try {
+    const { userId = 'anonymous', repoName, texFile = 'main.tex' } = req.body as CompileRepoRequest;
+    
+    if (!repoName) {
+      return res.status(400).json({ error: 'repoName is required' });
+    }
+
+    // Check if repository volume exists
+    const volumeInfo = containerService.getRepoVolumeInfo(repoName);
+    if (!volumeInfo) {
+      return res.status(404).json({ error: 'Repository not found' });
+    }
+
+    try {
+      // Ensure user's container is running
+      await containerService.getOrCreateUserContainer(userId, repoName);
+
+      // Load comments from the container
+      const { stdout: commentsJson } = await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['sh', '-c', `cat .underleaf/comments.json 2>/dev/null || echo "[]"`]
+      );
+      
+      let comments: Comment[];
+      try {
+        comments = JSON.parse(commentsJson.trim()) as Comment[];
+      } catch {
+        comments = [];
+      }
+
+      console.log(`Loading ${comments.length} comments for compilation`);
+
+      // Check if the tex file exists
+      let actualTexFile = texFile;
+      try {
+        await containerService.executeInUserContainer(userId, repoName, ['test', '-f', texFile]);
+      } catch {
+        // Look for common LaTeX main files
+        const commonFiles = ['paper.tex', 'main.tex', 'document.tex', 'article.tex'];
+        let foundFile = null;
+        
+        for (const file of commonFiles) {
+          try {
+            await containerService.executeInUserContainer(userId, repoName, ['test', '-f', file]);
+            foundFile = file;
+            break;
+          } catch {
+            // File doesn't exist, continue
+          }
+        }
+        
+        if (foundFile) {
+          actualTexFile = foundFile;
+        } else {
+          return res.status(404).json({ error: 'No LaTeX main file found' });
+        }
+      }
+
+      // Create temporary directory for comment compilation
+      const tempDir = '.underleaf-comments';
+      await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['rm', '-rf', tempDir]
+      );
+      await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['mkdir', '-p', tempDir]
+      );
+
+      // Copy all files to temporary directory preserving directory structure
+      await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['sh', '-c', `find . -type f \\( -name "*.tex" -o -name "*.bib" -o -name "*.cls" -o -name "*.sty" -o -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.pdf" -o -name "*.eps" \\) | grep -v "^\\./build/" | grep -v "^\\./${tempDir}/" | while read file; do mkdir -p "${tempDir}/$(dirname "$file")" && cp "$file" "${tempDir}/$file"; done`]
+      );
+
+      // Process each file with comments
+      const filesWithComments = [...new Set(comments.map(c => c.fileName))];
+      
+      for (const fileName of filesWithComments) {
+        const fileComments = comments.filter(c => c.fileName === fileName);
+        
+        if (fileComments.length > 0) {
+          console.log(`Processing ${fileComments.length} comments in ${fileName}`);
+          
+          // Read the original file
+          const { stdout: originalContent } = await containerService.executeInUserContainer(
+            userId,
+            repoName,
+            ['cat', fileName]
+          ) as { stdout: string };
+
+          // Convert comments to todonotes and insert them
+          const modifiedContent = await insertTodoNotes(originalContent, fileComments);
+
+          // Write the modified file to temp directory
+          const escapedContent = modifiedContent.replace(/'/g, "'\"'\"'");
+          await containerService.executeInUserContainer(
+            userId,
+            repoName,
+            ['sh', '-c', `mkdir -p "${tempDir}/$(dirname '${fileName}')" && printf '%s' '${escapedContent}' > "${tempDir}/${fileName}"`]
+          );
+        }
+      }
+
+      // Check if todonotes package exists anywhere in the project before adding it
+      const { stdout: todonotesCheck } = await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['sh', '-c', `find ${tempDir} -name "*.tex" -exec grep -l "usepackage.*todonotes" {} \\;`]
+      );
+
+      let needToAddTodonotes = todonotesCheck.trim() === '';
+      console.log(`Todonotes package check: found in files: [${todonotesCheck.trim()}], need to add: ${needToAddTodonotes}`);
+
+      // Add todonotes package to main document only if not found anywhere
+      const { stdout: mainContent } = await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['cat', `${tempDir}/${actualTexFile}`]
+      );
+
+      let modifiedMainContent = mainContent;
+      if (needToAddTodonotes) {
+        modifiedMainContent = addTodoNotesPackage(mainContent);
+      } else {
+        console.log('Todonotes package already exists in project files, skipping injection');
+      }
+      
+      const escapedMainContent = modifiedMainContent.replace(/'/g, "'\"'\"'");
+      await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['sh', '-c', `printf '%s' '${escapedMainContent}' > "${tempDir}/${actualTexFile}"`]
+      );
+
+      // Compile in temporary directory
+      let stdout = '';
+      let stderr = '';
+      
+      try {
+        // Change to temp directory and compile
+        const result = await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['sh', '-c', `cd ${tempDir} && latexmk -pdf -interaction=nonstopmode -output-directory=. ${actualTexFile}`]
+        );
+        stdout = result.stdout;
+        stderr = result.stderr || '';
+      } catch (latexmkError) {
+        // If latexmk is not available, fall back to manual pdflatex with bibliography handling
+        console.log('latexmk not available, falling back to pdflatex with manual bibliography handling');
+        
+        // First pass: pdflatex
+        let result = await containerService.executeInUserContainer(
+          userId,
+          repoName,
+          ['sh', '-c', `cd ${tempDir} && pdflatex -interaction=nonstopmode -output-directory=. ${actualTexFile}`]
+        );
+        stdout = result.stdout;
+        stderr = result.stderr || '';
+        
+        // Check if we have bibliography files (.bib) and run bibtex if needed
+        try {
+          const bibFiles = await containerService.executeInUserContainer(
+            userId,
+            repoName,
+            ['sh', '-c', `cd ${tempDir} && find . -name "*.bib" -type f`]
+          );
+          
+          if (bibFiles.stdout.trim()) {
+            console.log('Bibliography files found, running bibtex');
+            // Run bibtex on the aux file
+            const auxFile = actualTexFile.replace('.tex', '.aux');
+            try {
+              const bibtexResult = await containerService.executeInUserContainer(
+                userId,
+                repoName,
+                ['sh', '-c', `cd ${tempDir} && bibtex ${auxFile}`]
+              );
+              stdout += bibtexResult.stdout;
+              stderr += bibtexResult.stderr || '';
+              
+              // Second pass: pdflatex (to incorporate bibliography)
+              result = await containerService.executeInUserContainer(
+                userId,
+                repoName,
+                ['sh', '-c', `cd ${tempDir} && pdflatex -interaction=nonstopmode -output-directory=. ${actualTexFile}`]
+              );
+              stdout += result.stdout;
+              stderr += result.stderr || '';
+              
+              // Third pass: pdflatex (to resolve all references)
+              result = await containerService.executeInUserContainer(
+                userId,
+                repoName,
+                ['sh', '-c', `cd ${tempDir} && pdflatex -interaction=nonstopmode -output-directory=. ${actualTexFile}`]
+              );
+              stdout += result.stdout;
+              stderr += result.stderr || '';
+            } catch (bibtexError) {
+              console.log('bibtex failed, continuing with single pdflatex pass');
+            }
+          } else {
+            console.log('Bibliography files not found, running bibtex');
+            // No bibliography files, just run pdflatex twice for todonotes
+            // Second run for todonotes list
+            result = await containerService.executeInUserContainer(
+              userId,
+              repoName,
+              ['sh', '-c', `cd ${tempDir} && pdflatex -interaction=nonstopmode -output-directory=. ${actualTexFile}`]
+            );
+            stdout += result.stdout;
+            stderr += result.stderr || '';
+          }
+        } catch (findError) {
+          console.log('Could not check for bibliography files, continuing with single pass');
+          // Second run for todonotes list
+          result = await containerService.executeInUserContainer(
+            userId,
+            repoName,
+            ['sh', '-c', `cd ${tempDir} && pdflatex -interaction=nonstopmode -output-directory=. ${actualTexFile}`]
+          );
+          stdout += result.stdout;
+          stderr += result.stderr || '';
+        }
+      }
+
+      // Copy the compiled PDF back to build directory
+      const pdfFile = actualTexFile.replace('.tex', '.pdf');
+      await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['mkdir', '-p', 'build']
+      );
+      
+      await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['cp', `${tempDir}/${pdfFile}`, `build/${pdfFile}`]
+      );
+
+      // Clean up temporary directory
+      await containerService.executeInUserContainer(
+        userId,
+        repoName,
+        ['rm', '-rf', tempDir]
+      );
+
+      console.log(`Comments compilation successful for ${actualTexFile} with ${comments.length} comments`);
+      
+      return res.json({
+        message: `Compilation with comments successful (${comments.length} comments rendered)`,
+        pdfFile: pdfFile,
+        pdfUrl: `/api/files/${userId}/${repoName}/pdf/build/${pdfFile}`,
+        commentsCount: comments.length
+      });
+
+    } catch (compileError) {
+      console.error('Comments compilation failed:', compileError);
+      
+      // Clean up temp directory on error
+      // try {
+      //   await containerService.executeInUserContainer(
+      //     userId,
+      //     repoName,
+      //     ['rm', '-rf', '.underleaf-comments']
+      //   );
+      // } catch {
+      //   // Ignore cleanup errors
+      // }
+      
+      return res.status(500).json({
+        error: 'Comments compilation failed',
+        details: compileError instanceof Error ? compileError.message : 'Unknown error'
+      });
+    }
+
+  } catch (err) {
+    console.error('Compile with comments error:', err);
+    return res.status(500).json({ error: 'Comments compilation failed' });
+  }
+});
+
+// Interface for comments
+interface Comment {
+  id: string;
+  fileName: string;
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+  selectedText: string;
+  content: string;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Helper function to find safe insertion point that doesn't split LaTeX commands
+function findSafeInsertionPoint(line: string, targetColumn: number): number {
+  // If target is at start of line, it's safe
+  if (targetColumn <= 0) {
+    return 0;
+  }
+  
+  // If target is at end of line, it's safe
+  if (targetColumn >= line.length) {
+    return line.length;
+  }
+  
+  // Check if we're in the middle of a LaTeX command
+  // Look backwards to find if there's an unmatched opening of a command
+  let backslashPos = -1;
+  let braceCount = 0;
+  let bracketCount = 0;
+  
+  // Scan backwards from target position to find potential command start
+  for (let i = targetColumn - 1; i >= 0; i--) {
+    const char = line[i];
+    
+    if (char === '}') {
+      braceCount++;
+    } else if (char === '{') {
+      braceCount--;
+      // If we have unmatched opening brace and haven't found backslash yet, continue
+    } else if (char === ']') {
+      bracketCount++;
+    } else if (char === '[') {
+      bracketCount--;
+    } else if (char === '\\' && braceCount >= 0 && bracketCount >= 0) {
+      // Found potential command start
+      backslashPos = i;
+      break;
+    } else if (char === ' ' && braceCount === 0 && bracketCount === 0) {
+      // Space outside of braces/brackets - safe to break here
+      break;
+    }
+  }
+  
+  // If we found a potential command start, check if we're inside it
+  if (backslashPos >= 0) {
+    // Find the end of this command by scanning forward
+    let commandEnd = -1;
+    braceCount = 0;
+    bracketCount = 0;
+    let inCommandName = true;
+    
+    for (let i = backslashPos + 1; i < line.length; i++) {
+      const char = line[i];
+      
+      if (inCommandName) {
+        // Command name continues with letters
+        if (/[a-zA-Z]/.test(char)) {
+          continue;
+        } else {
+          inCommandName = false;
+        }
+      }
+      
+      if (char === '[') {
+        bracketCount++;
+      } else if (char === ']') {
+        bracketCount--;
+      } else if (char === '{') {
+        braceCount++;
+      } else if (char === '}') {
+        braceCount--;
+        if (braceCount === 0 && bracketCount === 0) {
+          // Found the end of the command
+          commandEnd = i + 1;
+          break;
+        }
+      } else if (braceCount === 0 && bracketCount === 0 && /\s/.test(char)) {
+        // Whitespace outside braces/brackets - command ended
+        commandEnd = i;
+        break;
+      }
+    }
+    
+    // If target is between command start and end, choose safer position
+    if (targetColumn > backslashPos && (commandEnd === -1 || targetColumn < commandEnd)) {
+      // We're inside a command, choose the closer safe position
+      const distanceToStart = targetColumn - backslashPos;
+      const distanceToEnd = commandEnd === -1 ? Infinity : commandEnd - targetColumn;
+      
+      if (distanceToStart <= distanceToEnd) {
+        // Closer to start, place before the backslash
+        return backslashPos;
+      } else {
+        // Closer to end, place after the command
+        return commandEnd === -1 ? line.length : commandEnd;
+      }
+    }
+  }
+  
+  // No command interference found, use original position
+  return targetColumn;
+}
+
+// Helper function to insert todo notes into file content
+async function insertTodoNotes(content: string, comments: Comment[]): Promise<string> {
+  const lines = content.split('\n');
+  
+  // Sort comments by position (reverse order to maintain line numbers)
+  const sortedComments = comments.sort((a, b) => {
+    if (a.startLine !== b.startLine) {
+      return b.startLine - a.startLine;
+    }
+    return b.startColumn - a.startColumn;
+  });
+
+  for (const comment of sortedComments) {
+    const { startLine, startColumn, content: commentContent, author } = comment;
+    
+    // Convert to 0-based indexing
+    const lineIndex = startLine - 1;
+    
+    if (lineIndex >= 0 && lineIndex < lines.length) {
+      const line = lines[lineIndex];
+      
+      // Find safe insertion point that doesn't split LaTeX commands
+      const safeColumn = findSafeInsertionPoint(line, startColumn);
+      
+      const beforeInsert = line.substring(0, safeColumn);
+      const afterInsert = line.substring(safeColumn);
+      
+      // Escape special LaTeX characters in comment
+      const escapedComment = commentContent
+        .replace(/\\/g, '\\textbackslash{}')
+        .replace(/[{}]/g, '\\$&')
+        .replace(/[#$%&_^~]/g, '\\$&')
+        .replace(/\n/g, ' ');
+      
+      const escapedAuthor = author
+        .replace(/\\/g, '\\textbackslash{}')
+        .replace(/[{}]/g, '\\$&')
+        .replace(/[#$%&_^~]/g, '\\$&');
+
+      // Insert todo note at the safe position
+      const todoNote = `\\todo[color=yellow!40]{\\textbf{${escapedAuthor}:} ${escapedComment}}`;
+      lines[lineIndex] = beforeInsert + todoNote + afterInsert;
+    }
+  }
+  
+  return lines.join('\n');
+}
+
+// Helper function to add todonotes package to document
+function addTodoNotesPackage(content: string): string {
+  // Check if todonotes package is already loaded
+  if (content.includes('\\usepackage') && content.match(/\\usepackage(\[[^\]]*\])?\{[^}]*todonotes[^}]*\}/)) {
+    console.log('todonotes package already exists in document, skipping injection');
+    return content; // Return unchanged if todonotes is already present
+  }
+  
+  // Look for \usepackage statements and add todonotes after the last one
+  const lines = content.split('\n');
+  let lastUsepackageIndex = -1;
+  
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim().startsWith('\\usepackage')) {
+      lastUsepackageIndex = i;
+    }
+  }
+  
+  if (lastUsepackageIndex !== -1) {
+    // Insert after the last usepackage
+    lines.splice(lastUsepackageIndex + 1, 0, '\\usepackage[colorinlistoftodos]{todonotes}');
+    console.log('Added todonotes package after existing usepackage statements');
+  } else {
+    // Look for \documentclass and insert after it
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trim().startsWith('\\documentclass')) {
+        lines.splice(i + 1, 0, '\\usepackage[colorinlistoftodos]{todonotes}');
+        console.log('Added todonotes package after documentclass');
+        break;
+      }
+    }
+  }
+  
+  return lines.join('\n');
+}
+
 // Git status endpoint
 app.get('/api/git/:userId/:repoName/status', async (req, res) => {
   try {
